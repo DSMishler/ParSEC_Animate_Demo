@@ -144,7 +144,9 @@ def sequential_order_generator(Ntiles_m, Ntiles_n, Ntiles_k, square_size = 6):
 # `tasks_at_frame`
 # This is an array of the number of tasks which have executed since the previous
 # frame.
-def animate_trace(trace, order_func,
+def animate_trace(trace, 
+                  trace_type,
+                  order_func = None,
                   which_animate = "tasks",
                   title = "unknown desc (pass something as 'title')",
                   num_frames = 50,         # Number of frames to use in the animation
@@ -163,9 +165,20 @@ def animate_trace(trace, order_func,
     print("Beginning animation of data '%s' method '%s'" % (title, which_animate))
     
     # Begin checks
+    if trace_type == "ptg": # TODO: find this programmatically
+        gemm_index = 17
+    elif trace_type == "dtd":
+        gemm_index = 19
+        if order_func is None:
+            print("Error: for DTD traces, you must supply an order function!")
+            return
+    else:
+        print("Error: unknown trace type '" + str(trace_type) + "'")
+        return
     
     # File type checks
-    if len(trace.events[trace.events.type == 19]["id"].unique()) != len(trace.events[trace.events.type == 19]["id"]):
+    if (len(trace.events[trace.events.type == gemm_index]["id"].unique()) !=
+       len(trace.events[trace.events.type == gemm_index]["id"])):
         print("Error: file is likely of invalid type")
         return
     
@@ -175,7 +188,7 @@ def animate_trace(trace, order_func,
         which_animate = "progress"
     # End checks
     # Begin estimation and preprocessing
-    orderdf = pd.DataFrame(trace.events[trace.events.type == 19].sort_values("begin"))
+    orderdf = pd.DataFrame(trace.events[trace.events.type == gemm_index].sort_values("begin"))
     first_end = orderdf["end"].iloc[0]
     first_begin = orderdf["begin"].iloc[0]
     last_end =  orderdf["end"].iloc[-1]
@@ -199,17 +212,6 @@ def animate_trace(trace, order_func,
         return
     
     # End estimation and preprocessing
-    id_orders = np.array(orderdf["id"])
-    
-    # Prepare an list of indices that index which tasks were executing based on the list of the order the tasks were inserted
-    indices_arr = np.zeros(len(id_orders),dtype=int)
-    check_for = 0
-    for id_normed in range(len(indices_arr)):
-        while(len(np.where(id_orders == check_for)[0]) == 0):
-            check_for += 1
-        indices_arr[np.where(id_orders == check_for)[0][0]] = id_normed
-        check_for += 1
-    
     Ntiles_m = math.ceil(M/tilesize)
     Ntiles_n = math.ceil(N/tilesize)
     Ntiles_k = math.ceil(K/tilesize)
@@ -219,8 +221,26 @@ def animate_trace(trace, order_func,
                  % (len(orderdf), Ntiles_m * Ntiles_n * Ntiles_k)
                  + "based on the arguments you provided for N, M, K, and tilesize.")
     
-    # Set up the ideal order given the implementation provided
-    ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+    
+    # This ID array is only needed for dtd traces.
+    # (Because the trace for DTD gemm does not supply us with
+    # m, n, and k, we must remember the order we insterted the tasks
+    # and re-extract that data as such:
+    if trace_type == "dtd":
+        id_orders = np.array(orderdf["id"])
+        
+        # Prepare an list of indices that index which tasks were executing
+        # based on the list of the order the tasks were inserted
+        indices_arr = np.zeros(len(id_orders),dtype=int)
+        check_for = 0
+        for id_normed in range(len(indices_arr)):
+            while(len(np.where(id_orders == check_for)[0]) == 0):
+                check_for += 1
+            indices_arr[np.where(id_orders == check_for)[0][0]] = id_normed
+            check_for += 1
+        # Set up the ideal order given the implementation provided
+        ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+    
     
     C_status = []
     for i in range(Ntiles_m):
@@ -299,7 +319,7 @@ def animate_trace(trace, order_func,
         animate_init_common("abc", "progress")
     
     # for the actual animation
-    def dtd_animate_common(frame, plots, mode):
+    def animate_common(frame, trace_type, plots, mode):
         global A_status
         global B_status
         global C_status
@@ -323,29 +343,26 @@ def animate_trace(trace, order_func,
             #        that it begins. That sounds like a safe assumption to me.
         
         tasks_at_frame.append(len(tasks_during))
-        """
-        if(len(tasks_during) < 2):
-            print("only %d tasks completed here!" % len(tasks_during), end=" ")
-            tasks_before = orderdf.loc[orderdf["begin"] <= time_point_curr]
-            tasks_active = tasks_before.loc[(tasks_before["end"] > time_point_curr)]
-            print("still %d tasks active." % len(tasks_active))
-            if(len(tasks_active) == 1):
-                print("Here's the culprit:")
-                for tid in tasks_active["id"]:
-                    tid_normed = indices_arr[np.where(id_orders == tid)][0]
-                    element = ideal_order[indices_arr[tid_normed]]
-                    print("m=%d,n=%d,k=%d" % (element[0], element[1], element[2]))
-        """
         
-        for tid in tasks_during["id"]:
-            tid_normed = indices_arr[np.where(id_orders == tid)][0]
-            element = ideal_order[indices_arr[tid_normed]]
-            if(plots == "c"):
-                C_status[element[0],element[1]] += 1
-            elif(plots == "abc"):
-                A_status[element[0],element[2]] += 1
-                B_status[element[2],element[1]] += 1
-                C_status[element[0],element[1]] += 1
+        if trace_type == "dtd":
+            for tid in tasks_during["id"]:
+                tid_normed = indices_arr[np.where(id_orders == tid)][0]
+                element = ideal_order[indices_arr[tid_normed]]
+                if(plots == "c"):
+                    C_status[element[0],element[1]] += 1
+                elif(plots == "abc"):
+                    A_status[element[0],element[2]] += 1
+                    B_status[element[2],element[1]] += 1
+                    C_status[element[0],element[1]] += 1
+        elif trace_type == "ptg":
+            for index, task in tasks_during.iterrows():
+                if(plots == "c"):
+                    C_status[task["m"], task["n"]] += 1
+                elif(plots == "abc"):
+                    A_status[task["m"], task["k"]] += 1
+                    B_status[task["k"], task["n"]] += 1
+                    C_status[task["m"], task["n"]] += 1
+                
         vmax_A = Ntiles_n
         vmax_B = Ntiles_m
         vmax_C = Ntiles_k
@@ -361,34 +378,64 @@ def animate_trace(trace, order_func,
             axC.pcolor(C_status, vmin = 0, vmax = vmax_C)
         return
     
-    def animate_order_with_time(frame):
-        dtd_animate_common(frame, "c", "tasks")
+    def animate_dtd_order_with_time(frame):
+        animate_common(frame, "dtd", "c", "tasks")
         return
     
-    def animate_order_with_time_all(frame):
-        dtd_animate_common(frame, "abc", "tasks")
+    def animate_dtd_order_with_time_all(frame):
+        animate_common(frame, "dtd", "abc", "tasks")
         return
     
-    def animate_order_progress(frame):
-        dtd_animate_common(frame, "c", "progress")
+    def animate_dtd_order_progress(frame):
+        animate_common(frame, "dtd", "c", "progress")
         return
         
-    def animate_order_progress_all(frame):
-        dtd_animate_common(frame, "abc", "progress")
+    def animate_dtd_order_progress_all(frame):
+        animate_common(frame, "dtd", "abc", "progress")
         return
     
-    if(which_animate == "tasks"):
-        animation_func = animate_order_with_time
-        animation_init = animate_init_with_time
-    elif(which_animate == "progress"):
-        animation_func = animate_order_progress
-        animation_init = animate_init_progress
-    elif(which_animate == "abctasks"):
-        animation_func = animate_order_with_time_all
-        animation_init = animate_init_with_time_all
-    elif(which_animate == "abcprogress"):
-        animation_func = animate_order_progress_all
-        animation_init = animate_init_progress_all
+    def animate_ptg_order_with_time(frame):
+        animate_common(frame, "ptg", "c", "tasks")
+        return
+    
+    def animate_ptg_order_with_time_all(frame):
+        animate_common(frame, "ptg", "abc", "tasks")
+        return
+    
+    def animate_ptg_order_progress(frame):
+        animate_common(frame, "ptg", "c", "progress")
+        return
+        
+    def animate_ptg_order_progress_all(frame):
+        animate_common(frame, "ptg", "abc", "progress")
+        return
+    
+    if(trace_type == "dtd"):
+        if(which_animate == "tasks"):
+            animation_func = animate_dtd_order_with_time
+            animation_init = animate_init_with_time
+        elif(which_animate == "progress"):
+            animation_func = animate_dtd_order_progress
+            animation_init = animate_init_progress
+        elif(which_animate == "abctasks"):
+            animation_func = animate_dtd_order_with_time_all
+            animation_init = animate_init_with_time_all
+        elif(which_animate == "abcprogress"):
+            animation_func = animate_dtd_order_progress_all
+            animation_init = animate_init_progress_all
+    elif(trace_type == "ptg"):
+        if(which_animate == "tasks"):
+            animation_func = animate_ptg_order_with_time
+            animation_init = animate_init_with_time
+        elif(which_animate == "progress"):
+            animation_func = animate_ptg_order_progress
+            animation_init = animate_init_progress
+        elif(which_animate == "abctasks"):
+            animation_func = animate_ptg_order_with_time_all
+            animation_init = animate_init_with_time_all
+        elif(which_animate == "abcprogress"):
+            animation_func = animate_ptg_order_progress_all
+            animation_init = animate_init_progress_all
         
     padding_frames = fps // 2 # Supply a half second of stillness at the end
     animation_result = FuncAnimation(fig,animation_func, init_func = animation_init,
