@@ -1,5 +1,5 @@
 # Daniel Mishler
-# Last push to github 2022-06-01
+# Last push to github 2022-06-08
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -140,8 +140,8 @@ def sequential_order_generator(Ntiles_m, Ntiles_n, Ntiles_k, square_size = 6):
 # Such lists are modified both by animate_trace and a function within it,
 # which is necessary to implement in order to achieve the format that 
 # is required by FuncAnimation
-# The fourth global is
-# tasks_at_frame
+# The last globals are
+# `tasks_at_frame`
 # This is an array of the number of tasks which have executed since the previous
 # frame.
 def animate_trace(trace, order_func,
@@ -154,6 +154,11 @@ def animate_trace(trace, order_func,
                   N=4000,
                   K=4000,
                   tilesize = 200):
+    
+    global A_status
+    global B_status
+    global C_status
+    global tasks_at_frame
     start_time = time.time()
     print("Beginning animation of data '%s' method '%s'" % (title, which_animate))
     
@@ -208,23 +213,30 @@ def animate_trace(trace, order_func,
     Ntiles_m = math.ceil(M/tilesize)
     Ntiles_n = math.ceil(N/tilesize)
     Ntiles_k = math.ceil(K/tilesize)
-    global A_status
-    global B_status
-    global C_status
-    global tasks_at_frame
-    A_status = []
-    B_status = []
+    # Check to see if we have as many tasks as we should expect for a GEMM
+    if(Ntiles_m * Ntiles_n * Ntiles_k != len(orderdf)):
+        print("warning: it seems like your trace has %d tasks, but I expected %d "
+                 % (len(orderdf), Ntiles_m * Ntiles_n * Ntiles_k)
+                 + "based on the arguments you provided for N, M, K, and tilesize.")
+    
+    # Set up the ideal order given the implementation provided
+    ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+    
     C_status = []
     for i in range(Ntiles_m):
-        A_status.append(np.zeros(Ntiles_k))
-    for i in range(Ntiles_k):
-        B_status.append(np.zeros(Ntiles_n))
-    for i in range(Ntiles_m):
         C_status.append(np.zeros(Ntiles_n))
-    A_status = np.array(A_status)
-    B_status = np.array(B_status)
     C_status = np.array(C_status)
-    ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+    
+    if(which_animate == "abcprogress" or which_animate == "abctasks"):
+        A_status = []
+        for i in range(Ntiles_m):
+            A_status.append(np.zeros(Ntiles_k))
+        A_status = np.array(A_status)
+        B_status = []
+        for i in range(Ntiles_k):
+            B_status.append(np.zeros(Ntiles_n))
+        B_status = np.array(B_status)
+    
     
     # Prepare the figure that will be displayed
     fld = 6.5 # figsize larger dimension
@@ -258,39 +270,72 @@ def animate_trace(trace, order_func,
         ax.invert_yaxis()
     
     # Enter the animation functions
-    
     # plots: 'c' for just plotting matrix c, 'abc' for all three
-    # mode: 'progress' for keeping the trace active, 'tasks' to see what was active and when.
+    # mode: 'progress' for keeping the tiles colored, 'tasks' to reset them and see what was active and when.
+    # FuncAnimate works best with an init function, even if it doesn't do much or the init is done elsewhere.
+    def animate_init_common(plots, mode):
+        global A_status
+        global B_status
+        global C_status
+        global tasks_at_frame
+        tasks_at_frame = []
+        C_status = C_status * 0
+        if(plots == "abc"):
+            A_status = A_status * 0
+            B_status = B_status * 0
+        
+        return
+    
+    def animate_init_with_time():
+        animate_init_common("c", "tasks")
+    
+    def animate_init_with_time_all():
+        animate_init_common("abc", "tasks")
+    
+    def animate_init_progress():
+        animate_init_common("c", "progress")
+    
+    def animate_init_progress_all():
+        animate_init_common("abc", "progress")
+    
+    # for the actual animation
     def dtd_animate_common(frame, plots, mode):
         global A_status
         global B_status
         global C_status
         global tasks_at_frame
-        time_point_curr = int(frame*(last_end - first_begin)/num_frames) + first_begin
-        time_point_prev = int((frame-1)*(last_end - first_begin)/num_frames) + first_begin
+        # time_point_curr and time_point_prev in units of nanoseconds
+        time_point_curr = ((frame+1)*(last_end - first_begin))//num_frames + first_begin
+        time_point_prev = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
+        if(frame >= num_frames): # This construction to allow dead frames at the end
+            time_point_prev = time_point_curr = last_end
+            
         if(mode == "tasks"):
             C_status = C_status * 0 # Always zero when doing task timing
             if(plots == "abc"):
                 A_status = A_status * 0 # Always zero when doing task timing
                 B_status = B_status * 0 # Always zero when doing task timing
-        if(frame == 0):
-            tasks_at_frame = []
-            C_status = C_status * 0
-            if(plots == "abc"):
-                A_status = A_status * 0
-                B_status = B_status * 0
-        if(frame == num_frames - 1):
-            time_point_curr = last_end
-        if(frame >= num_frames):
-            time_point_prev = time_point_curr = last_end
-            
             
         tasks_before = orderdf.loc[orderdf["end"] <= time_point_curr]
         tasks_during = tasks_before.loc[(tasks_before["end"] > time_point_prev)]
+            # aside: you might think this construction with > time_point_prev wouldn't include the first task,
+            #        but this is fine! The only assumption made is that the first tasks does not end the same nanoseond
+            #        that it begins. That sounds like a safe assumption to me.
         
         tasks_at_frame.append(len(tasks_during))
-        # for task in tasks_during:
-            # pass
+        """
+        if(len(tasks_during) < 2):
+            print("only %d tasks completed here!" % len(tasks_during), end=" ")
+            tasks_before = orderdf.loc[orderdf["begin"] <= time_point_curr]
+            tasks_active = tasks_before.loc[(tasks_before["end"] > time_point_curr)]
+            print("still %d tasks active." % len(tasks_active))
+            if(len(tasks_active) == 1):
+                print("Here's the culprit:")
+                for tid in tasks_active["id"]:
+                    tid_normed = indices_arr[np.where(id_orders == tid)][0]
+                    element = ideal_order[indices_arr[tid_normed]]
+                    print("m=%d,n=%d,k=%d" % (element[0], element[1], element[2]))
+        """
         
         for tid in tasks_during["id"]:
             tid_normed = indices_arr[np.where(id_orders == tid)][0]
@@ -314,6 +359,7 @@ def animate_trace(trace, order_func,
             axB.pcolor(B_status, vmin = 0, vmax = vmax_B)
             axC.set_title("Matrix C")
             axC.pcolor(C_status, vmin = 0, vmax = vmax_C)
+        return
     
     def animate_order_with_time(frame):
         dtd_animate_common(frame, "c", "tasks")
@@ -333,15 +379,20 @@ def animate_trace(trace, order_func,
     
     if(which_animate == "tasks"):
         animation_func = animate_order_with_time
+        animation_init = animate_init_with_time
     elif(which_animate == "progress"):
         animation_func = animate_order_progress
+        animation_init = animate_init_progress
     elif(which_animate == "abctasks"):
         animation_func = animate_order_with_time_all
+        animation_init = animate_init_with_time_all
     elif(which_animate == "abcprogress"):
         animation_func = animate_order_progress_all
+        animation_init = animate_init_progress_all
         
     padding_frames = fps // 2 # Supply a half second of stillness at the end
-    animation_result = FuncAnimation(fig,animation_func,frames=(num_frames+padding_frames),interval=int(1000/fps))
+    animation_result = FuncAnimation(fig,animation_func, init_func = animation_init,
+                                     frames=(num_frames+padding_frames),interval=1000//fps)
     video = animation_result.to_html5_video()
     html = display.HTML(video)
     display.display(html)
@@ -350,20 +401,61 @@ def animate_trace(trace, order_func,
 
     end_time = time.time()
     ## Printing
+    tasks_times = (orderdf["end"] - orderdf["begin"]).to_numpy()
+    tasks_times = tasks_times / 1000000 # convert from ns to ms
+    tasks_execution_mean = tasks_times.mean()
+    tasks_execution_sdev = tasks_times.std()
+    tasks_runtime = (last_end - first_begin) / 1000000 # in ms
+    utilization = (tasks_execution_mean * len(tasks_times)) / tasks_runtime
+    num_cores = trace.information["nb_cores"]
     print("Data titled '%s'" % title)
-    print("M=%d\tN=%d\tK=%d" % (M,N,K))
+    print("M=%d,\tN=%d,\tK=%d,\ttilesize=%d" % (M,N,K,tilesize))
+    print("average task execution time: %f" % tasks_execution_mean)
+    print("task execution time standard deviation: %f" % tasks_execution_sdev)
+    print("utilization: %f over %d cores (%f)" % (utilization, num_cores, utilization/num_cores))
     print("execution time to generate graphs: %f seconds" % (end_time-start_time))
     
     # Plot of the file tasks per frame
     fig, ax = plt.subplots(1, figsize = [5,5])
-    ax.plot(range(num_frames+padding_frames), tasks_at_frame)
-    ax.set_title("tasks since each frame")
-    ax.set_xlabel("frame number")
+    times_array = np.array(range(num_frames+padding_frames))*time_per_frame*1000
+    ax.plot(times_array, tasks_at_frame, "*-")
+    ax.set_title("tasks since each frame (%s)" % title)
+    ax.set_xlabel("time (ms)")
     ax.set_ylabel("number of tasks")
-    fname = "tasks_per_frame_(%s).png"%title
+    fname = "tasks_per_frame_(%s).png" % title
+    plt.savefig(fname)
     # Offer the user the filename in case they wish to display it after
     print("saved task metadata file:", fname)
+    
+    
+    # Plot of the task timings
+    # currently sorted by task beginning time
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(range(len(tasks_times)), tasks_times, "*")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by beginning time)")
+    ax.set_ylabel("task duration (ms)")
+    fname = "tasks_times_execution_order_(%s).png" % title
     plt.savefig(fname)
+    # Offer the user the filename in case they wish to display it after
+    print("saved task metadata file:", fname)
+    
+    
+    # Do it again but sort them by execution duration
+    tasks_times.sort() # Now sorted by task duration
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(range(len(tasks_times)), tasks_times, "*")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by beginning time)")
+    ax.set_ylabel("task duration (ms)")
+    fname = "tasks_times_sorted_(%s).png" % title
+    plt.savefig(fname)
+    # Offer the user the filename in case they wish to display it after
+    print("saved task metadata file:", fname)
+    
+    if(sum(tasks_at_frame) != Ntiles_m * Ntiles_n * Ntiles_k):
+        print("error: expected %d tasks but I only observed %d in the trace" %
+              (Ntiles_m * Ntiles_n * Ntiles_k, sum(tasks_at_frame)))
     
     print()
 
