@@ -1,5 +1,5 @@
 # Daniel Mishler
-# Last push to github 2022-06-22
+# Last push to github 2022-07-22
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -133,7 +133,274 @@ def sequential_order_generator(Ntiles_m, Ntiles_n, Ntiles_k, square_size = 6):
         
     return ordered_list
 
+
+
+################################################################################################
+# helper functions to make the animation function itself shorter and more readable
+################################################################################################
+def guess_trace_type(trace):
+    # TODO: Make a more sophisticated guess
+    try:
+        trace.events["m"]
+        trace_type = "ptg"
+    except KeyError:
+        trace_type = "dtd"
+    return trace_type
+
+def guess_running_system(trace):
+    # TODO: Make a more sophisticated guess
+    try:
+        trace.information["HWLOC-XML"]
+        running_system = "dplasma"
+    except KeyError:
+        running_system = "hicma"
+    return running_system
+
+def check_for_order_function(trace_type, order_func):
+    if trace_type == "ptg":
+        error = False
+    elif trace_type == "dtd":
+        if order_func is None:
+            print("Error: for DTD traces, you must supply an order function!")
+            error = True
+        else:
+            error = False
+    else:
+        print("Error: unknown trace type '" + str(trace_type) + "'")
+        error = True
+    return error
+
+def check_parameter_compatibility(task_type, trace_type, which_animate, M, N, K):
+    if task_type == "gemm":
+        error = False
+    elif task_type == "potrf":
+        error = False
+        if trace_type != "ptg":
+            print("Error: potrf only supported with ptg")
+            error = True
+        if(which_animate == "abcprogress" or which_animate == "abctasks"):
+            print("Error: potrf only supported with C view")
+            error = True
+        if N != M:
+            print("Error: only square animations of potrf supported")
+            error = True
+    else:
+        print("Error: unknown task type '" + str(task_type) +"'")
+        error = True
+    return error
     
+def get_work_tasks_indices(trace, task_type, running_system):
+    # TODO: Feels like this one could use some generalization and cleanup too.
+    # TODO: split this into two functions, each with 1 return
+    work_tasks_indices = []
+    if task_type == "gemm":
+        name_to_task_num = None
+        gemm_index_found = 0
+        for name in trace.event_types.index: # An array of numbers indexed by their name. Interesting, huh?
+            if name.lower() == "gemm":
+                work_tasks_indices.append(trace.event_types[name])
+                gemm_index_found += 1
+                break
+        if gemm_index_found != 1:
+            print("Error: file trace does not have its event_types set properly")
+            print("found %d events, expected %d" % (gemm_index_found, 1))
+            return None, None
+    
+    elif task_type == "potrf":
+        name_to_task_num = {}
+        potrf_index_found = 0
+        for name in trace.event_types.index:
+            if "potrf_" in name.lower(): # Could possibly use regex for this...
+                for taskname in ["gemm", "syrk", "trsm", "potrf"]:
+                    if(taskname in name.split('_')[-1].lower()):
+                        print("found task type %s (#%d)" % (name.lower(), trace.event_types[name]))
+                        work_tasks_indices.append(trace.event_types[name])
+                        if(running_system == "hicma"):
+                            if("3flow" in name.lower()):
+                                name_to_task_num["large-"+taskname] = trace.event_types[name]
+                            else:
+                                name_to_task_num["small-"+taskname] = trace.event_types[name]
+                        elif(running_system == "dplasma"):
+                            name_to_task_num[taskname] = trace.event_types[name]
+                        else:
+                            print("error: unknown running system")
+                        potrf_index_found += 1
+                        break
+        if(running_system == "hicma"):
+            expected_task_types = 8
+        elif(running_system == "dplasma"):
+            expected_task_types = 4
+        if potrf_index_found != expected_task_types:
+            print("Error: file trace does not have its event_types set properly")
+            print("found %d events, expected %d" % (potrf_index_found, 4))
+            return None, None
+    return (work_tasks_indices, name_to_task_num)
+    
+def get_potrf_uplo(running_system, orderdf, name_to_task_num):
+    # TODO: There gotta be a better way to do this than peek at a task, no?
+    if running_system == "dplasma":
+        test_task = "trsm"
+    elif running_system == "hicma":
+        test_task = "small-trsm"
+    else:
+        print("Error, unknown running system!")
+        return None
+    
+    if orderdf.loc[orderdf["type"] == name_to_task_num[test_task]].iloc[0]["m"] is None:
+        potrf_uplo = "upper"
+    else:
+        potrf_uplo = "lower"
+    return potrf_uplo
+
+def get_time_per_frame(first_begin, last_end, num_frames, enforce_interval):
+    # Possibly enforce an interval in seconds
+    if enforce_interval is not None:
+        time_per_frame = enforce_interval
+        num_frames = math.ceil((last_end - first_begin)/10**9/time_per_frame)
+        print("enforcing %d frames to grant you your requested enforced interval" % (num_frames))
+    if(num_frames <= 0):
+        print("Error: illegal number of frames. Must be at least 1")
+        return None
+    time_per_frame = (last_end - first_begin)/10**9/num_frames
+    return time_per_frame
+
+def get_estimated_video_time(which_animate, running_system, task_type, num_frames, Ntiles_m, Ntiles_n):
+    # Estimate time to get graphs
+    # TODO: find a better way to calculate this - currently it's just loosely
+    #       fit to whatever I observe on my laptop.
+    estimation_multiplier = 1
+    if(which_animate == "abcprogress" or which_animate == "abctasks"):
+        estimation_multiplier *= 2 # for abc type calls
+    if running_system == "hicma":
+        estimation_multiplier *= 0.20
+    if task_type == "gemm":
+        estimation_multiplier *= 3
+    estimated_compile_time = (num_frames * 0.0004 * ((Ntiles_m * Ntiles_n)**0.9) * estimation_multiplier)
+    return estimated_compile_time
+
+def get_expected_tasks(task_type, running_system, Ntiles_m, Ntiles_n, Ntiles_k):
+    # How many work tasks should I expect, given what I know about the problem?
+    # This information will prove useful for error checking.
+    if task_type == "gemm":
+        expected_tasks = Ntiles_m * Ntiles_n * Ntiles_k
+    elif task_type == "potrf":
+        if Ntiles_m != Ntiles_n:
+            print("error: expected 'n' and 'm' to be equal to POTRF trace")
+            return None
+        # expected_tasks = Ntiles_m # potrf
+        # expected_tasks += ((Ntiles_m-1)*(Ntiles_m)) // 2 # trsm
+        # expected_tasks += ((Ntiles_m-1)*(Ntiles_m)) // 2 # syrk
+        # for i in range(Ntiles_m-1): # gemm 
+            # expected_tasks += (i*(i+1)) // 2
+        # Alternative methods
+        # n * 1 + (n-1) * 2 + (n-2) * 3 + (n-3) * 4 + ...
+        # which is same as: sum over (x^2/2 + x/2) from 1 to n
+        # which is the same as: (n) * (n+1) * (n+2) / 6
+        if running_system == "dplasma":
+            expected_tasks = (Ntiles_m)*(Ntiles_m+1)*(Ntiles_m+2)//6
+        elif running_system == "hicma":
+            if bigtilesize % tilesize != 0:
+                print("error: cannot have large tilesize and smaller tilesize not evenly divide.")
+                return None
+            small_tiles = bigtilesize//tilesize
+            Nbigtiles = math.ceil(M/bigtilesize)
+            # large tasks
+            expected_tasks = (Nbigtiles)*(Nbigtiles+1)*(Nbigtiles+2)//6
+            # small tasks
+            tasks_per_potrf = (small_tiles)*(small_tiles+1)*(small_tiles+2)//6
+            expected_tasks += Nbigtiles * (tasks_per_potrf)
+    return expected_tasks
+
+def get_id_orders(orderdf, order_func, Ntiles_m, Ntiles_n, Ntiles_k):
+    id_orders = np.array(orderdf["id"])
+    
+    # Prepare an list of indices that index which tasks were executing
+    # based on the list of the order the tasks were inserted
+    indices_arr = np.zeros(len(id_orders),dtype=int)
+    check_for = 0
+    for id_normed in range(len(indices_arr)):
+        while(len(np.where(id_orders == check_for)[0]) == 0):
+            check_for += 1
+        indices_arr[np.where(id_orders == check_for)[0][0]] = id_normed
+        check_for += 1
+    # Set up the ideal order given the implementation provided
+    ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+    return (id_orders, ideal_order, indices_arr)
+    
+def init_global_arrays(Ntiles_m, Ntiles_n, Ntiles_k, which_animate):
+    global A_status
+    global B_status
+    global C_status
+    global C_stream_id
+    global A_expected # Currently unused
+    global B_expected
+    global C_expected
+    C_status = []
+    C_expected = []
+    C_stream_id = []
+    for i in range(Ntiles_m):
+        C_status.append(np.zeros(Ntiles_n))
+        C_expected.append(np.zeros(Ntiles_n))
+        C_stream_id.append(np.zeros(Ntiles_n))
+    C_status = np.array(C_status)
+    C_expected = np.array(C_expected)
+    C_stream_id = np.array(C_stream_id)
+    
+    if(which_animate == "abcprogress" or which_animate == "abctasks"):
+        A_status = []
+        A_expected = []
+        for i in range(Ntiles_m):
+            A_status.append(np.zeros(Ntiles_k))
+            A_expected.append(np.zeros(Ntiles_k))
+        A_status = np.array(A_status)
+        A_expected = np.array(A_expected)
+        B_status = []
+        B_expected = []
+        for i in range(Ntiles_k):
+            B_status.append(np.zeros(Ntiles_n))
+            B_expected.append(np.zeros(Ntiles_n))
+        B_status = np.array(B_status)
+        B_expected = np.array(B_expected)
+    
+def get_figsize_dimensions(Ntiles_m, Ntiles_n):
+    # TODO: get this to conside Ntiles_k
+    fmxd = 6.5 # figsize maximum dimension
+    fmnd = 3.5 # figsize minimum dimension
+    if Ntiles_m >= Ntiles_n:
+        figsize_x = fmxd*Ntiles_n/Ntiles_m
+        figsize_y = fmxd
+        if(figsize_x < fmnd):
+            figsize_x = fmnd
+    else:
+        figsize_x = fmxd
+        figsize_y = fmxd*Ntiles_m/Ntiles_n
+        if(figsize_y < fmnd):
+            figsize_y = fmnd
+    figsize_dims = [figsize_x, figsize_y]
+    return figsize_dims
+
+def init_plt_figure(which_animate, figsize_dims):
+    if(which_animate == "abcprogress" or which_animate == "abctasks"):
+        fig, ((axx, axB), (axA, axC)) = plt.subplots(2,2, figsize = figsize_dims)
+        # fig.colorbar(axC.pcolormesh(C_status,vmin=0,vmax=1))
+        axA.pcolormesh(A_status, vmin = 0, vmax = 1)
+        axA.invert_yaxis()
+        axB.pcolormesh(B_status, vmin = 0, vmax = 1)
+        axB.invert_yaxis()
+        axC.pcolormesh(C_status, vmin = 0, vmax = 1)
+        axC.invert_yaxis()
+    else:
+        fig, axC = plt.subplots(1, figsize = figsize_dims)
+        axC.pcolormesh(C_status, vmin = 0, vmax = 1)
+        # fig.colorbar(axC.pcolormesh(C_status,vmin=0,vmax=1))
+        axC.invert_yaxis()
+        axx = None
+        axA = None
+        axB = None
+    return (fig, ((axx, axB), (axA, axC)))
+################################################################################################
+# trace function
+################################################################################################
 # Some globals are needed for the below function:
 # A_status, B_status, C_status, A_expected, B_expected, C_expected
 # These lists of lists represent the progress of the job on each tile
@@ -191,6 +458,11 @@ def animate_trace(trace,
         print("Error: must provide argument for tilesize (even if you don't think it makes sense in the problem!)")
         return
     
+    if which_animate not in ["tasks", "abctasks", "progress", "abcprogress", "coreswaps"]:
+        print("warning, I don't know what you wanted me to animate (which_animate='%s')" % which_animate)
+        print("I'll animate the progress animation")
+        which_animate = "progress"
+    
     legal_fills = ["relative", "absolute"]
     if fill not in legal_fills:
         print("Error: fill must be in ", legal_fills)
@@ -198,114 +470,37 @@ def animate_trace(trace,
         
     
     # Guess the trace type
-    # TODO: Make a more sophisticated guess
-    try:
-        trace.events["m"]
-        trace_type = "ptg"
-    except KeyError:
-        trace_type = "dtd"
-    
+    trace_type = guess_trace_type(trace)
     print("After observing your trace, I am guessing it is from the %s interface" % trace_type)
     
-    if trace_type == "ptg":
-        pass
-    elif trace_type == "dtd":
-        if order_func is None:
-            print("Error: for DTD traces, you must supply an order function!")
-            return
-    else:
-        print("Error: unknown trace type '" + str(trace_type) + "'")
+    running_system = guess_running_system(trace)
+    print("I think this trace is for a job that was running on", running_system)
+    
+    error = check_for_order_function(trace_type, order_func)
+    if error == True:
         return
     
     
-    if task_type == "gemm":
-        pass
-    elif task_type == "potrf":
-        if trace_type != "ptg":
-            print("Error: potrf only supported with ptg")
-            return
-        if(which_animate == "abcprogress" or which_animate == "abctasks"):
-            print("Error: potrf only supported with C view")
-            return
-        if N != M:
-            print("Error: only square animations of potrf supported")
-            return
-    else:
-        print("Error: unknown task type '" + str(task_type) +"'")
+    error = check_parameter_compatibility(task_type, trace_type, which_animate, M, N, K)
+    if error == True:
         return
     
-    if which_animate not in ["tasks", "abctasks", "progress", "abcprogress", "coreswaps"]:
-        print("warning, I don't know what you wanted me to animate (which_animate='%s')" % which_animate)
-        print("I'll animate the progress animation")
-        which_animate = "progress"
+    
     # Begin estimation and preprocessing
-    try:
-        trace.information["HWLOC-XML"]
-        running_system = "dplasma"
-    except KeyError:
-        running_system = "hicma"
-    print("I think this trace is for a task that was running on", running_system)
-    work_tasks_indices = []
-    if task_type == "gemm":
-        gemm_index_found = 0
-        for i in trace.event_types.index: # An array of numbers indexed by their name. Interesting, huh?
-            if i.lower() == "gemm":
-                work_tasks_indices.append(trace.event_types[i])
-                gemm_index_found += 1
-                break
-        if gemm_index_found != 1:
-            print("Error: file trace does not have its event_types set properly")
-            print("found %d events, expected %d" % (gemm_index_found, 1))
-            return
+    (work_tasks_indices, name_to_task_num) = get_work_tasks_indices(trace, task_type, running_system)
+    if work_tasks_indices is None or (name_to_task_num is None and trace_type == "potrf"):
+        return
     
-    elif task_type == "potrf":
-        name_to_task_num = {}
-        potrf_index_found = 0
-        for i in trace.event_types.index:
-            if "potrf_" in i.lower(): # Could possibly use regex for this...
-                for taskname in ["gemm", "syrk", "trsm", "potrf"]:
-                    if(taskname in i.split('_')[-1].lower()):
-                        print("found task type %s (#%d)" % (i.lower(), trace.event_types[i]))
-                        work_tasks_indices.append(trace.event_types[i])
-                        if(running_system == "hicma"):
-                            if("3flow" in i.lower()):
-                                name_to_task_num["large-"+taskname] = trace.event_types[i]
-                            else:
-                                name_to_task_num["small-"+taskname] = trace.event_types[i]
-                        elif(running_system == "dplasma"):
-                            name_to_task_num[taskname] = trace.event_types[i]
-                        else:
-                            print("error: unknown running system")
-                        potrf_index_found += 1
-                        break
-        if(running_system == "hicma"):
-            expected_task_types = 8
-        elif(running_system == "dplasma"):
-            expected_task_types = 4
-        if potrf_index_found != expected_task_types:
-            print("Error: file trace does not have its event_types set properly")
-            print("found %d events, expected %d" % (potrf_index_found, 4))
-            return
-    
-    # Start with an all false indexing structure.
-    # TODO: learn more about what this thing is.
-    work_tasks = (trace.events.type == 0) & (trace.events.type == 1)
-    
-    # build work_tasks
-    for i in work_tasks_indices:
-        loop_start = time.time()
-        print("checking index and preparing work tasks for ", i)
-        work_task = trace.events.type == i
-        work_tasks |= work_task
-        loop_mid = time.time()
-        # if (len(trace.events[work_task]["id"].unique()) != len(trace.events[work_task]["id"])):
-            # print("Warning: file does not have fully unique tasks for task type %d" % i)
-        loop_end = time.time()
-        # print("time for unique check:", loop_end-loop_mid)
-        print("time for array prep:  ", loop_mid-loop_start)
-        
+    # Now isolate just the work tasks
+    # This is the step that seems to take forever.
+    work_tasks = trace.events.type.isin(work_tasks_indices)
     orderdf = pd.DataFrame(trace.events[work_tasks].sort_values("begin"))
-        
+    
+    if task_type == "potrf":
+        potrf_uplo = get_potrf_uplo(running_system, orderdf, name_to_task_num)
+        if potrf_uplo is None:
+            return
+        print("I think this is potrf is %s triangular" % potrf_uplo)
         
     first_begin = orderdf["begin"].iloc[0]
     last_end =  orderdf["end"].iloc[-1]
@@ -314,49 +509,23 @@ def animate_trace(trace,
     Ntiles_n = math.ceil(N/tilesize)
     Ntiles_k = math.ceil(K/tilesize)
     
-    # Possibly enforce an interval in seconds
-    if enforce_interval is not None:
-        time_per_frame = enforce_interval
-        num_frames = math.ceil((last_end - first_begin)/10**9/time_per_frame)
-        print("enforcing %d frames to grant you your requested enforced interval" % (num_frames))
-    time_per_frame = (last_end - first_begin)/10**9/num_frames
+    
+    time_per_frame = get_time_per_frame(first_begin, last_end, num_frames, enforce_interval)
+    if time_per_frame is None:
+        return
     print("process runtime per frame: %f seconds" % (time_per_frame))
     
-    estimation_multiplier = 1
-    if(which_animate == "abcprogress" or which_animate == "abctasks"):
-        estimation_multiplier *= 2 # for abc type calls
-    if running_system == "hicma":
-        estimation_multiplier *= 0.20
-    if task_type == "gemm":
-        estimation_multiplier *= 3
-    print("estimated execution time (assuming a lightweight commercial processor): %f seconds" %
-          (num_frames * 0.0004 * ((Ntiles_m * Ntiles_n)**0.9) * estimation_multiplier))
-    if(num_frames > 100):
-        print("animate_trace warning: num_frames beyond 100 may cause long compute time")
-    if(num_frames > 500):
-        print("animate_trace warning: num_frames beyond 500 may cause extreme compute time")
-    if(num_frames <= 0):
-        print("Error: illegal number of frames. Must be at least 1")
-        return
     
-    # End estimation and preprocessing
-    if task_type == "gemm":
-        expected_tasks = Ntiles_m * Ntiles_n * Ntiles_k
-    elif task_type == "potrf":
-        if Ntiles_m != Ntiles_n:
-            print("error: expected 'n' and 'm' to be equal to POTRF trace")
-            return
-        expected_tasks = Ntiles_m # potrf
-        expected_tasks += ((Ntiles_m-1)*(Ntiles_m)) // 2 # trsm
-        expected_tasks += ((Ntiles_m-1)*(Ntiles_m)) // 2 # syrk
-        for i in range(Ntiles_m-1): # gemm 
-            expected_tasks += (i*(i+1)) // 2
-        #TODO: use the sum of squares of natural numbers formula
-        
-        # Alternative methods
-        # n * 1 + (n-1) * 2 + (n-2) * 3 + (n-3) * 4 + ...
-        # which is same as: sum over (x^2/2 + x/2) from 1 to n
-        # which is the same as: (n) * (n+1) * (n+2) / 6
+    estimated_compile_time = get_estimated_video_time(which_animate, running_system,
+                                                      task_type, num_frames,
+                                                      Ntiles_m, Ntiles_n)
+    print("estimated video compile time (assuming a lightweight commercial processor): %f seconds" %
+          estimated_compile_time)
+    
+    
+    expected_tasks = get_expected_tasks(task_type, running_system, Ntiles_m, Ntiles_n, Ntiles_k)
+    if expected_tasks is None:
+        return
     
     
     # This ID array is only needed for dtd traces.
@@ -364,83 +533,24 @@ def animate_trace(trace,
     # m, n, and k, we must remember the order we insterted the tasks
     # and re-extract that data as such:
     if trace_type == "dtd":
-        id_orders = np.array(orderdf["id"])
-        
-        # Prepare an list of indices that index which tasks were executing
-        # based on the list of the order the tasks were inserted
-        indices_arr = np.zeros(len(id_orders),dtype=int)
-        check_for = 0
-        for id_normed in range(len(indices_arr)):
-            while(len(np.where(id_orders == check_for)[0]) == 0):
-                check_for += 1
-            indices_arr[np.where(id_orders == check_for)[0][0]] = id_normed
-            check_for += 1
-        # Set up the ideal order given the implementation provided
-        ideal_order = order_func(Ntiles_m, Ntiles_n, Ntiles_k)
+        (id_orders, ideal_order, indices_arr) = get_id_orders(orderdf, order_func, Ntiles_m, Ntiles_n, Ntiles_k)
+        if id_orders is None or ideal_order is None or indices_arr is None:
+            return
     
     
-    C_status = []
-    C_expected = []
-    C_stream_id = []
-    for i in range(Ntiles_m):
-        C_status.append(np.zeros(Ntiles_n))
-        C_expected.append(np.zeros(Ntiles_n))
-        C_stream_id.append(np.zeros(Ntiles_n))
-    C_status = np.array(C_status)
-    C_expected = np.array(C_expected)
-    C_stream_id = np.array(C_stream_id)
-    
-    if(which_animate == "abcprogress" or which_animate == "abctasks"):
-        A_status = []
-        A_expected = []
-        for i in range(Ntiles_m):
-            A_status.append(np.zeros(Ntiles_k))
-            A_expected.append(np.zeros(Ntiles_k))
-        A_status = np.array(A_status)
-        A_expected = np.array(A_expected)
-        B_status = []
-        B_expected = []
-        for i in range(Ntiles_k):
-            B_status.append(np.zeros(Ntiles_n))
-            B_expected.append(np.zeros(Ntiles_n))
-        B_status = np.array(B_status)
-        B_expected = np.array(B_expected)
-    
+    # End estimation and preprocessing
+    # Prepare the arrays used for the animation
+    init_global_arrays(Ntiles_m, Ntiles_n, Ntiles_k, which_animate)
     
     # Prepare the figure that will be displayed
-    fld = 6.5 # figsize larger dimension
-    fmd = 3.5 # figsize minimum dimension
-    if Ntiles_m >= Ntiles_n:
-        figsize_x = fld*Ntiles_n/Ntiles_m
-        figsize_y = fld
-        if(figsize_x < fmd):
-            figsize_x = fmd
-    else:
-        figsize_x = fld
-        figsize_y = fld*Ntiles_m/Ntiles_n
-        if(figsize_y < fmd):
-            figsize_y = fmd
-            
-    visual_vmax = Ntiles_k # TODO: remove if percentage is the way to go
-    # Make the figure
-    if(which_animate == "abcprogress" or which_animate == "abctasks"):
-        fig, ((axx, axB), (axA, axC)) = plt.subplots(2,2, figsize = [figsize_x, figsize_y])
-        # fig.colorbar(axC.pcolormesh(C_status,vmin=0,vmax=visual_vmax))
-        axA.pcolormesh(A_status, vmin = 0, vmax = 1)
-        axA.invert_yaxis()
-        axB.pcolormesh(B_status, vmin = 0, vmax = 1)
-        axB.invert_yaxis()
-        axC.pcolormesh(C_status, vmin = 0, vmax = 1)
-        axC.invert_yaxis()
-    else:
-        fig, ax = plt.subplots(1, figsize = [figsize_x, figsize_y])
-        ax.pcolormesh(C_status, vmin = 0, vmax = visual_vmax)
-        # fig.colorbar(ax.pcolormesh(C_status,vmin=0,vmax=1))
-        ax.invert_yaxis()
+    figsize_dims = get_figsize_dimensions(Ntiles_m, Ntiles_n)
+    fig, ((axx, axB), (axA, axC)) = init_plt_figure(which_animate, figsize_dims)
+    
     
     # Enter the animation functions
     # plots: 'c' for just plotting matrix c, 'abc' for all three
     # mode: 'progress' for keeping the tiles colored, 'tasks' to reset them and see what was active and when.
+    
     # FuncAnimate works best with an init function, even if it doesn't do much or the init is done elsewhere.
     def animate_init_common(plots):
         global A_status
@@ -469,13 +579,14 @@ def animate_trace(trace,
                 A_expected += Ntiles_n
                 B_expected += Ntiles_m
             C_stream_id -= 1 # Set stream_id regardless of the plots
-        elif task_type == "potrf": # TODO: add tasks to this animation function, have it be an even C_expected
-                                   # future daniel: what?
+        elif task_type == "potrf":
             if fill == "relative":
                 for i in range(len(C_expected)):
                     for j in range(len(C_expected[0])):
-                        if j <= i:
+                        if j <= i: # For lower triangular
                             C_expected[i,j] = j+1
+                        elif j >= i: # For upper triangular
+                            C_expected[i,j] = i+1
             elif fill == "absolute":
                 C_expected += len(C_expected[0])
         else:
@@ -499,9 +610,11 @@ def animate_trace(trace,
         global B_expected
         global C_expected
         # time_point_curr and time_point_prev in units of nanoseconds
-        time_point_curr = ((frame+1)*(last_end - first_begin))//num_frames + first_begin
-        time_point_prev = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
-        if(frame >= num_frames): # This construction to allow dead frames at the end
+        time_point_curr = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
+        time_point_prev = ((frame-1)*(last_end - first_begin))//num_frames + first_begin
+        if(frame == 0): # One empty frame at start
+            time_point_prev = time_point_cur = first_begin
+        if(frame >  num_frames): # This construction to allow dead frames at the end
             time_point_prev = time_point_curr = last_end
             
         if(mode == "tasks"):
@@ -547,12 +660,9 @@ def animate_trace(trace,
                 B_status[k, n] += 1 / B_expected[k, n]
                 C_status[m, n] += 1 / C_expected[m, n]
                 
-        vmax_A = Ntiles_n
-        vmax_B = Ntiles_m
-        vmax_C = Ntiles_k # TODO: remove these if we go through with the percentage calculation
         if(plots == "c"):
-            ax.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
-            ax.pcolormesh(C_status, vmin = 0, vmax = 1)
+            axC.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
+            axC.pcolormesh(C_status, vmin = 0, vmax = 1)
         elif(plots == "abc"):
             axA.set_title("Matrix A")
             axA.pcolormesh(A_status, vmin = 0, vmax = 1)
@@ -596,10 +706,13 @@ def animate_trace(trace,
         global C_status
         global tasks_at_frame
         global C_expected
+        global large_tile
         # time_point_curr and time_point_prev in units of nanoseconds
-        time_point_curr = ((frame+1)*(last_end - first_begin))//num_frames + first_begin
-        time_point_prev = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
-        if(frame >= num_frames): # This construction to allow dead frames at the end
+        time_point_curr = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
+        time_point_prev = ((frame-1)*(last_end - first_begin))//num_frames + first_begin
+        if(frame == 0): # One empty frame at start
+            time_point_prev = time_point_cur = first_begin
+        if(frame >  num_frames): # This construction to allow dead frames at the end
             time_point_prev = time_point_curr = last_end
             
         if(mode == "tasks"):
@@ -613,62 +726,75 @@ def animate_trace(trace,
         
         tasks_at_frame.append(len(tasks_during))
         
-        do_once = 1 # TODO: get rid of me
         for index, task in tasks_during.iterrows():
             m = task["m"]
             n = task["n"]
             k = task["k"]
             # print("type:", task["type"], "m,n,k:", m,n,k)
-            # dplasma and hicma order the m, n, and k differently
-            if running_system == "dplasma":
+            # uplo of the matrix order the m, n, and k differently
+            if running_system == "dplasma": # Upper triangular
                 if task["type"] == name_to_task_num["potrf"]:
                     if k is None:
                         print("k should not be none here")
                     target_row = k
                     target_col = k
                 elif task["type"] == name_to_task_num["trsm"]:
-                    if k is None:
-                        print("k should not be none here")
-                    if n is None:
-                        print("n should not be none here")
-                    target_row = n
-                    target_col = k
+                    if potrf_uplo == "upper":
+                        target_row = k
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = k
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (trsm)")
                 elif task["type"] == name_to_task_num["syrk"]:
-                    if n is None:
-                        print("n should not be none here")
-                    target_row = n
-                    target_col = n
+                    if potrf_uplo == "upper":
+                        target_row = n
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = m
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (syrk)")
                 elif task["type"] == name_to_task_num["gemm"]:
                     if m is None:
                         print("m should not be none here")
                     if n is None:
                         print("n should not be none here")
-                    target_row = n
-                    target_col = m
+                    target_row = m
+                    target_col = n
                 else:
                     print("error: unexpected task of type %d" % task["type"])
                     print(task)
                 C_status[target_row, target_col] += 1 / C_expected[target_row, target_col]
-            elif running_system == "hicma":
+            elif running_system == "hicma": # Lower triangular
+                stride = bigtilesize // tilesize
                 if task["type"] == name_to_task_num["large-potrf"]:
                     if k is None:
                         print("k should not be none here (potrf)")
                     target_row = k
                     target_col = k
                     large_task = True
+                    large_tile = k
                 elif task["type"] == name_to_task_num["large-trsm"]:
-                    if m is None:
-                        print("m should not be none here (trsm)")
-                    if k is None:
-                        print("k should not be none here (trsm)")
-                    target_row = m
-                    target_col = k
+                    if potrf_uplo == "upper":
+                        target_row = k
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = k
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (trsm)")
                     large_task = True
                 elif task["type"] == name_to_task_num["large-syrk"]:
-                    if m is None:
-                        print("m should not be none here (syrk)")
-                    target_row = m
-                    target_col = m
+                    if potrf_uplo == "upper":
+                        target_row = n
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = m
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (syrk)")
                     large_task = True
                 elif task["type"] == name_to_task_num["large-gemm"]:
                     if m is None:
@@ -684,27 +810,26 @@ def animate_trace(trace,
                     target_row = k
                     target_col = k
                     large_task = False
-                    # print("small potrf: k=%d\n" % k)
-                    if(do_once == 1):
-                        # print(task)
-                        do_once = 0
-                    continue
                 elif task["type"] == name_to_task_num["small-trsm"]:
-                    if m is None:
-                        print("m should not be none here (trsm)")
-                    if k is None:
-                        print("k should not be none here (trsm)")
-                    target_row = m
-                    target_col = k
+                    if potrf_uplo == "upper":
+                        target_row = k
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = k
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (trsm)")
                     large_task = False
-                    continue
                 elif task["type"] == name_to_task_num["small-syrk"]:
-                    if m is None:
-                        print("m should not be none here (syrk)")
-                    target_row = m
-                    target_col = m
+                    if potrf_uplo == "upper":
+                        target_row = n
+                        target_col = n
+                    elif potrf_uplo == "lower":
+                        target_row = m
+                        target_col = m
+                    if target_row is None or target_col is None:
+                        print("a parameter was none that shouldn't have been (syrk)")
                     large_task = False
-                    continue
                 elif task["type"] == name_to_task_num["small-gemm"]:
                     if m is None:
                         print("m should not be none here (gemm)")
@@ -713,42 +838,35 @@ def animate_trace(trace,
                     target_row = m
                     target_col = n
                     large_task = False
-                    continue
                 else:
                     print("error: unexpected task of type %d" % task["type"])
                     print(task)
                 if large_task == True:
-                    stride = bigtilesize // tilesize # TODO: error check this
                     for i in range(target_row*stride, (target_row+1)*stride):
                         for j in range(target_col*stride, (target_col+1)*stride):
-                            if(j > i):
-                                if(task["type"] == name_to_task_num["large-potrf"]):
-                                    # print("potrf over-diag")
-                                    pass # No suprise
-                                elif(task["type"] == name_to_task_num["large-trsm"]):
-                                    print("trsm over-diag")
-                                elif(task["type"] == name_to_task_num["large-syrk"]):
-                                    # print("syrk over-diag")
-                                    pass # No suprise
-                                elif(task["type"] == name_to_task_num["large-gemm"]):
-                                    print("gemm over-diag")
-                                else:
-                                    print("(small) task %d over-diag" % task["type"])
+                            if(task["type"] == name_to_task_num["large-potrf"]):
+                                # This is a recursive task: no updates.
+                                # The updates are spawned by its children
                                 continue
-                            C_status[i, j] += stride / C_expected[i, j]
-                            if C_expected[i,j] == 0:
-                                print("divide by 0: i=%d,j=%d" % (i,j))
+                            elif(task["type"] == name_to_task_num["large-syrk"]):
+                                if(j > i):
+                                    continue # No suprise
+                                C_status[i, j] += stride / C_expected[i, j]
+                            elif(task["type"] == name_to_task_num["large-trsm"]):
+                                C_status[i, j] += ((j % stride)+1) / C_expected[i, j]
+                            elif(task["type"] == name_to_task_num["large-gemm"]):
+                                C_status[i, j] += stride / C_expected[i, j]
+                            else:
+                                print("(small) task %d over-diag" % task["type"])
                 else:
+                    target_row += stride * large_tile
+                    target_col += stride * large_tile
                     C_status[target_row, target_col] += 1 / C_expected[target_row, target_col]
             else:
                 print("Error: unknown running system")
                 
-        vmax_A = Ntiles_n
-        vmax_B = Ntiles_m
-        vmax_C = Ntiles_k
-        
-        ax.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
-        ax.pcolormesh(C_status, vmin = 0, vmax = 1)
+        axC.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
+        axC.pcolormesh(C_status, vmin = 0, vmax = 1)
         return
     
     def animate_potrf_tasks(frame):
@@ -804,7 +922,8 @@ def animate_trace(trace,
             animation_func = animate_potrf_progress
         
     mid_time = time.time()
-    padding_frames = fps // 2 # Supply a half second of stillness at the end
+    # Supply a half second of stillness at the end
+    padding_frames = max(fps // 2, 2)
     animation_result = FuncAnimation(fig,animation_func, init_func = animation_init,
                                      frames=(num_frames+padding_frames),interval=1000//fps)
     video = animation_result.to_html5_video()
@@ -873,7 +992,7 @@ def animate_trace(trace,
         print("error: expected %d tasks but I only observed %d in the trace" %
               (expected_tasks, sum(tasks_at_frame)))
     
-    """
+    """ # This test would only make sense for 'progress' mode
     if(sum(sum(C_status)) != expected_tasks):
         print("warning: C_status expected updates %d times but received %d updates" %
               (expected_tasks, sum(sum(C_status))))
