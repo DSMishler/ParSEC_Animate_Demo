@@ -1,5 +1,5 @@
 # Daniel Mishler
-# Last push to github 2022-01-06
+# Last push to github 2022-01-09
 
 # TODO: should I sort the tasks before parsing them *within* a frame?
 # Just because I haven't seen a bug doesn't mean it's not possiblle...
@@ -964,53 +964,36 @@ def animate_trace(trace,
                 n = task["n"]
                 k = task["k"]
                 
+            # Update the sim cache
+            if(core_work_tiles[core][0] != m or
+               core_work_tiles[core][1] != n):
+                core_work_tiles[core] = [m, n, k] 
+                core_migrations += 1
+                if(C_status[m, n] == 0):
+                    # TODO: this doesn't work for 'tasks' type runs
+                    migrations_dict[task["id"]] = "first access"
+                else:
+                    migrations_dict[task["id"]] = "migrated"
+            else:
+                core_hits += 1
+                migrations_dict[task["id"]] = "reused"
+            # Update the plot
             if(plots == "c"):
                 if mode == "swaps":
                     if(core_work_tiles[core][0] != m or
                        core_work_tiles[core][1] != n):
-                        core_work_tiles[core] = [m, n, k] 
-                        core_migrations += 1
-                        if(C_status[m, n] == 0):
-                            migrations_dict[task["id"]] = "first access"
-                        else:
-                            migrations_dict[task["id"]] = "migrated"
                         C_status[m, n] += 1 / C_expected[m, n]
-                    else:
-                        core_hits += 1
-                        migrations_dict[task["id"]] = "reused"
                 elif mode in ["tasks", "progress"]:
                     C_status[m, n] += 1 / C_expected[m, n]
                 else:
                     print("error: unknown mode", mode)
             elif(plots == "abc"):
-                if (mode == "progress"):
-                    if(core_work_tiles[core][0] != m or
-                       core_work_tiles[core][1] != n):
-                        showing_this_to_the_crew = False
-                        if(showing_this_to_the_crew):
-                            prio = task["priority"]
-                            if(k == 0):
-                                pass
-                            else:
-                                print(f"core miss: core {core} last worked on {core_work_tiles[core]}, ", end="")
-                                print(f"but now working on tile {[m,n,k]} (priority {prio}).")
-                                print(f"methane core calculation: {(m%6)+6*(n%6)} saturn: {(m%5)+5*(n%4)}")
-                        
-                        
-                        core_migrations += 1
-                        if (C_status[m, n] == 0):
-                            migrations_dict[task["id"]] = "first access"
-                        else:
-                            migrations_dict[task["id"]] = "migrated"
-                            
-                        core_work_tiles[core] = [m, n, k] 
-                        E_status[m, n] += 1 / C_expected[m, n]
-                    else:
-                        core_hits += 1
-                        migrations_dict[task["id"]] = "reused"
                 A_status[m, k] += 1 / A_expected[m, k]
                 B_status[k, n] += 1 / B_expected[k, n]
                 C_status[m, n] += 1 / C_expected[m, n]
+                if(core_work_tiles[core][0] != m or
+                   core_work_tiles[core][1] != n):
+                    E_status[m, n] += 1 / C_expected[m, n]
                 
             # always run cache simulation, regardless of whether the migrations check is done
             # TODO: determine which cache a task applies to
@@ -1286,11 +1269,11 @@ def animate_trace(trace,
     
     orderdf = orderdf.sort_values("begin")
     
-    mgd2 = {"id": [], "migrated": []}
+    mgd2 = {"id": [], "core_memory": []}
     csd2 = {"id": [], "sim_L2_hit": [], "sim_L3_hit": [], "sim_MM_hit": []}
     for key in migrations_dict:
         mgd2["id"].append(key)
-        mgd2["migrated"].append(migrations_dict[key])
+        mgd2["core_memory"].append(migrations_dict[key])
     for key in cache_sim_dict:
         csd2["id"].append(key)
         for cache_type in cache_sim_dict[key]:
@@ -1311,9 +1294,9 @@ def animate_trace(trace,
        do_core_migration_plots = True
     else:
        do_core_migration_plots = False
-    migrated_df = orderdf[orderdf.loc[:,"migrated"] == "migrated"]
-    core_hit_df = orderdf[orderdf.loc[:,"migrated"] == "reused"]
-    f_access_df = orderdf[orderdf.loc[:,"migrated"] == "first access"]
+    migrated_df = orderdf[orderdf.loc[:,"core_memory"] == "migrated"]
+    core_hit_df = orderdf[orderdf.loc[:,"core_memory"] == "reused"]
+    f_access_df = orderdf[orderdf.loc[:,"core_memory"] == "first access"]
     sim_L2_3hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 3]
     sim_L2_2hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 2]
     sim_L2_1hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 1]
@@ -1326,8 +1309,8 @@ def animate_trace(trace,
     sim_MM_2hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 2]
     sim_MM_1hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 1]
     sim_MM_miss_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 0]
-    # print(orderdf[orderdf.loc[:,"migrated"] == True])
-    # tasks_migrations = orderdf["migrated"].to_numpy()
+    # print(orderdf[orderdf.loc[:,"core_memory"] == True])
+    # tasks_migrations = orderdf["core_memory"].to_numpy()
     # print(tasks_migrations)
     # for thing in tasks_migrations:
         # print(thing)
@@ -1385,9 +1368,9 @@ def animate_trace(trace,
     # Prune some data for violin, pruned plots
     prune_threshold = tasks_execution_mean*5
     pruned_orderdf = orderdf[orderdf.loc[:, "duration"] < prune_threshold]
-    pruned_migrated_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "migrated"]
-    pruned_core_hit_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "reused"]
-    pruned_f_access_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "first access"]
+    pruned_migrated_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "migrated"]
+    pruned_core_hit_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "reused"]
+    pruned_f_access_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "first access"]
     pruned_sim_L2_3hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 3]
     pruned_sim_L2_2hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 2]
     pruned_sim_L2_1hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 1]
@@ -1417,38 +1400,149 @@ def animate_trace(trace,
     pruned_sim_MM_2hit_tasks_times = (pruned_sim_MM_2hit_df["duration"]).to_numpy()
     pruned_sim_MM_1hit_tasks_times = (pruned_sim_MM_1hit_df["duration"]).to_numpy()
     pruned_sim_MM_miss_tasks_times = (pruned_sim_MM_miss_df["duration"]).to_numpy()
-    migrated_tt_mean = migrated_tasks_times.mean()
-    core_hit_tt_mean = core_hit_tasks_times.mean()
-    f_access_tt_mean = f_access_tasks_times.mean()
-    sL2_3hit_tt_mean = sim_L2_3hit_tasks_times.mean()
-    sL2_2hit_tt_mean = sim_L2_2hit_tasks_times.mean()
-    sL2_1hit_tt_mean = sim_L2_1hit_tasks_times.mean()
-    sL2_miss_tt_mean = sim_L2_miss_tasks_times.mean()
-    sL3_3hit_tt_mean = sim_L3_3hit_tasks_times.mean()
-    sL3_2hit_tt_mean = sim_L3_2hit_tasks_times.mean()
-    sL3_1hit_tt_mean = sim_L3_1hit_tasks_times.mean()
-    sL3_miss_tt_mean = sim_L3_miss_tasks_times.mean()
-    sMM_3hit_tt_mean = sim_MM_3hit_tasks_times.mean()
-    sMM_2hit_tt_mean = sim_MM_2hit_tasks_times.mean()
-    sMM_1hit_tt_mean = sim_MM_1hit_tasks_times.mean()
-    sMM_miss_tt_mean = sim_MM_miss_tasks_times.mean()
-    # sMM_miss_tt_std  = sim_MM_miss_tasks_times.std()
-    migrated_ptt_mean = pruned_migrated_tasks_times.mean()
-    core_hit_ptt_mean = pruned_core_hit_tasks_times.mean()
-    f_access_ptt_mean = pruned_f_access_tasks_times.mean()
-    sL2_3hit_ptt_mean = pruned_sim_L2_3hit_tasks_times.mean()
-    sL2_2hit_ptt_mean = pruned_sim_L2_2hit_tasks_times.mean()
-    sL2_1hit_ptt_mean = pruned_sim_L2_1hit_tasks_times.mean()
-    sL2_miss_ptt_mean = pruned_sim_L2_miss_tasks_times.mean()
-    sL3_3hit_ptt_mean = pruned_sim_L3_3hit_tasks_times.mean()
-    sL3_2hit_ptt_mean = pruned_sim_L3_2hit_tasks_times.mean()
-    sL3_1hit_ptt_mean = pruned_sim_L3_1hit_tasks_times.mean()
-    sL3_miss_ptt_mean = pruned_sim_L3_miss_tasks_times.mean()
-    sMM_3hit_ptt_mean = pruned_sim_MM_3hit_tasks_times.mean()
-    sMM_2hit_ptt_mean = pruned_sim_MM_2hit_tasks_times.mean()
-    sMM_1hit_ptt_mean = pruned_sim_MM_1hit_tasks_times.mean()
-    sMM_miss_ptt_mean = pruned_sim_MM_miss_tasks_times.mean()
-    # sMM_miss_ptt_std  = pruned_sim_MM_miss_tasks_times.std()
+    
+    # So we don't end up taking means of empty arrays. We want '0' for things were there is no population.
+    # Replace this code:
+    # migrated_ptt_mean = pruned_migrated_tasks_times.mean()
+    # core_hit_ptt_mean = pruned_core_hit_tasks_times.mean()
+    # f_access_ptt_mean = pruned_f_access_tasks_times.mean()
+    # sL2_3hit_ptt_mean = pruned_sim_L2_3hit_tasks_times.mean()
+    # sL2_2hit_ptt_mean = pruned_sim_L2_2hit_tasks_times.mean()
+    # sL2_1hit_ptt_mean = pruned_sim_L2_1hit_tasks_times.mean()
+    # sL2_miss_ptt_mean = pruned_sim_L2_miss_tasks_times.mean()
+    # sL3_3hit_ptt_mean = pruned_sim_L3_3hit_tasks_times.mean()
+    # sL3_2hit_ptt_mean = pruned_sim_L3_2hit_tasks_times.mean()
+    # sL3_1hit_ptt_mean = pruned_sim_L3_1hit_tasks_times.mean()
+    # sL3_miss_ptt_mean = pruned_sim_L3_miss_tasks_times.mean()
+    # sMM_3hit_ptt_mean = pruned_sim_MM_3hit_tasks_times.mean()
+    # sMM_2hit_ptt_mean = pruned_sim_MM_2hit_tasks_times.mean()
+    # sMM_1hit_ptt_mean = pruned_sim_MM_1hit_tasks_times.mean()
+    # sMM_miss_ptt_mean = pruned_sim_MM_miss_tasks_times.mean()
+    # with this much less readable but more runnable code:
+    
+    if(len(migrated_tasks_times) > 0):
+        migrated_tt_mean = migrated_tasks_times.mean()
+    else:
+        migrated_tt_mean = 0
+    if(len(core_hit_tasks_times) > 0):
+        core_hit_tt_mean = core_hit_tasks_times.mean()
+    else:
+        core_hit_tt_mean = 0
+    if(len(f_access_tasks_times) > 0):
+        f_access_tt_mean = f_access_tasks_times.mean()
+    else:
+        f_access_tt_mean = 0
+    if(len(sim_L2_3hit_tasks_times) > 0):
+        sL2_3hit_tt_mean = sim_L2_3hit_tasks_times.mean()
+    else:
+        sL2_3hit_tt_mean = 0
+    if(len(sim_L2_2hit_tasks_times) > 0):
+        sL2_2hit_tt_mean = sim_L2_2hit_tasks_times.mean()
+    else:
+        sL2_2hit_tt_mean = 0
+    if(len(sim_L2_1hit_tasks_times) > 0):
+        sL2_1hit_tt_mean = sim_L2_1hit_tasks_times.mean()
+    else:
+        sL2_1hit_tt_mean = 0
+    if(len(sim_L2_miss_tasks_times) > 0):
+        sL2_miss_tt_mean = sim_L2_miss_tasks_times.mean()
+    else:
+        sL2_miss_tt_mean = 0
+    if(len(sim_L3_3hit_tasks_times) > 0):
+        sL3_3hit_tt_mean = sim_L3_3hit_tasks_times.mean()
+    else:
+        sL3_3hit_tt_mean = 0
+    if(len(sim_L3_2hit_tasks_times) > 0):
+        sL3_2hit_tt_mean = sim_L3_2hit_tasks_times.mean()
+    else:
+        sL3_2hit_tt_mean = 0
+    if(len(sim_L3_1hit_tasks_times) > 0):
+        sL3_1hit_tt_mean = sim_L3_1hit_tasks_times.mean()
+    else:
+        sL3_1hit_tt_mean = 0
+    if(len(sim_L3_miss_tasks_times) > 0):
+        sL3_miss_tt_mean = sim_L3_miss_tasks_times.mean()
+    else:
+        sL3_miss_tt_mean = 0
+    if(len(sim_MM_3hit_tasks_times) > 0):
+        sMM_3hit_tt_mean = sim_MM_3hit_tasks_times.mean()
+    else:
+        sMM_3hit_tt_mean = 0
+    if(len(sim_MM_2hit_tasks_times) > 0):
+        sMM_2hit_tt_mean = sim_MM_2hit_tasks_times.mean()
+    else:
+        sMM_2hit_tt_mean = 0
+    if(len(sim_MM_1hit_tasks_times) > 0):
+        sMM_1hit_tt_mean = sim_MM_1hit_tasks_times.mean()
+    else:
+        sMM_1hit_tt_mean = 0
+    if(len(sim_MM_miss_tasks_times) > 0):
+        sMM_miss_tt_mean = sim_MM_miss_tasks_times.mean()
+    else:
+        sMM_miss_tt_mean = 0
+    
+    if(len(pruned_migrated_tasks_times) > 0):
+        migrated_ptt_mean = pruned_migrated_tasks_times.mean()
+    else:
+        migrated_ptt_mean = 0
+    if(len(pruned_core_hit_tasks_times) > 0):
+        core_hit_ptt_mean = pruned_core_hit_tasks_times.mean()
+    else:
+        core_hit_ptt_mean = 0
+    if(len(pruned_f_access_tasks_times) > 0):
+        f_access_ptt_mean = pruned_f_access_tasks_times.mean()
+    else:
+        f_access_ptt_mean = 0
+    if(len(pruned_sim_L2_3hit_tasks_times) > 0):
+        sL2_3hit_ptt_mean = pruned_sim_L2_3hit_tasks_times.mean()
+    else:
+        sL2_3hit_ptt_mean = 0
+    if(len(pruned_sim_L2_2hit_tasks_times) > 0):
+        sL2_2hit_ptt_mean = pruned_sim_L2_2hit_tasks_times.mean()
+    else:
+        sL2_2hit_ptt_mean = 0
+    if(len(pruned_sim_L2_1hit_tasks_times) > 0):
+        sL2_1hit_ptt_mean = pruned_sim_L2_1hit_tasks_times.mean()
+    else:
+        sL2_1hit_ptt_mean = 0
+    if(len(pruned_sim_L2_miss_tasks_times) > 0):
+        sL2_miss_ptt_mean = pruned_sim_L2_miss_tasks_times.mean()
+    else:
+        sL2_miss_ptt_mean = 0
+    if(len(pruned_sim_L3_3hit_tasks_times) > 0):
+        sL3_3hit_ptt_mean = pruned_sim_L3_3hit_tasks_times.mean()
+    else:
+        sL3_3hit_ptt_mean = 0
+    if(len(pruned_sim_L3_2hit_tasks_times) > 0):
+        sL3_2hit_ptt_mean = pruned_sim_L3_2hit_tasks_times.mean()
+    else:
+        sL3_2hit_ptt_mean = 0
+    if(len(pruned_sim_L3_1hit_tasks_times) > 0):
+        sL3_1hit_ptt_mean = pruned_sim_L3_1hit_tasks_times.mean()
+    else:
+        sL3_1hit_ptt_mean = 0
+    if(len(pruned_sim_L3_miss_tasks_times) > 0):
+        sL3_miss_ptt_mean = pruned_sim_L3_miss_tasks_times.mean()
+    else:
+        sL3_miss_ptt_mean = 0
+    if(len(pruned_sim_MM_3hit_tasks_times) > 0):
+        sMM_3hit_ptt_mean = pruned_sim_MM_3hit_tasks_times.mean()
+    else:
+        sMM_3hit_ptt_mean = 0
+    if(len(pruned_sim_MM_2hit_tasks_times) > 0):
+        sMM_2hit_ptt_mean = pruned_sim_MM_2hit_tasks_times.mean()
+    else:
+        sMM_2hit_ptt_mean = 0
+    if(len(pruned_sim_MM_1hit_tasks_times) > 0):
+        sMM_1hit_ptt_mean = pruned_sim_MM_1hit_tasks_times.mean()
+    else:
+        sMM_1hit_ptt_mean = 0
+    if(len(pruned_sim_MM_miss_tasks_times) > 0):
+        sMM_miss_ptt_mean = pruned_sim_MM_miss_tasks_times.mean()
+    else:
+        sMM_miss_ptt_mean = 0
+        
+    
     if (I_want_to_see_task_times == True):
         print("average task execution time (ms): %f" % tasks_execution_mean)
         print("migrated: %f\treuse: %f\tfirst access: %f" % (migrated_ptt_mean, core_hit_ptt_mean, f_access_ptt_mean))
@@ -1540,9 +1634,9 @@ def animate_trace(trace,
     ##### Make DF's again (sorted this time)
     pruned_orderdf = pruned_orderdf.sort_values("duration") # Now sorted by task duration
     pruned_orderdf["new_idx"] = np.arange(len(pruned_orderdf))
-    pruned_migrated_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "migrated"]
-    pruned_core_hit_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "reused"]
-    pruned_f_access_df = pruned_orderdf[pruned_orderdf.loc[:,"migrated"] == "first access"]
+    pruned_migrated_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "migrated"]
+    pruned_core_hit_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "reused"]
+    pruned_f_access_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "first access"]
     pruned_sim_L2_3hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 3]
     pruned_sim_L2_2hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 2]
     pruned_sim_L2_1hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_L2_hit"] == 1]
@@ -1646,7 +1740,7 @@ def animate_trace(trace,
               (expected_tasks, sum(tasks_at_frame)))
     
     # print(f"len(f_access_df):{(len(f_access_df))}\t expected first accesses: {Ntiles_n * Ntiles_m}")
-    if(len(f_access_df) != Ntiles_n * Ntiles_m):
+    if(task_type == "gemm" and len(f_access_df) != Ntiles_n * Ntiles_m):
         print("error: something isn't right about the first tasks policy")
         print(f"    I counted {len(f_access_df)} first accesses but expected {Ntiles_n * Ntiles_m}!")
     
