@@ -1,5 +1,5 @@
 # Daniel Mishler
-# Last push to github 2022-01-09
+# Last push to github 2022-03-27
 
 # TODO: should I sort the tasks before parsing them *within* a frame?
 # Just because I haven't seen a bug doesn't mean it's not possiblle...
@@ -200,11 +200,11 @@ def check_parameters_basic(M, N, K, tilesize, fill, which_animate):
 
 def guess_trace_type(trace):
     # TODO: Make a more sophisticated guess
-    try:
-        trace.events["m"]
-        trace_type = "ptg"
-    except KeyError:
+    runline = trace.information["exe"]
+    if "dtd" in runline:
         trace_type = "dtd"
+    else:
+        trace_type = "ptg"
     return trace_type
 
 def guess_running_system(trace):
@@ -215,6 +215,13 @@ def guess_running_system(trace):
     except KeyError:
         running_system = "hicma"
     return running_system
+
+def guess_machine(trace):
+    try:
+        machine = trace.information["hostname"]
+    except KeyError:
+        machine = "unknown"
+    return machine
 
 def check_for_order_function(trace_type, order_func):
     if trace_type == "ptg":
@@ -684,6 +691,114 @@ def setup_caches(xmlinfo, tilesize, print_cache = False):
             
     return Memory(main_memory)
 
+def get_events_before(trace, core, time, nevents = 6):
+    tevents = trace.events.loc[trace.events["stream_id"] == core]
+    tevents = tevents.loc[tevents["begin"] < time]
+    tevents = tevents.sort_values("begin")
+    tevents = tevents[-nevents:]
+    return tevents
+
+def friendly_event_print_df(events):
+    print(f"{len(events)} total events:")
+    for i in range(len(events)):
+        event = events.iloc[i]
+        begin = event["begin"]
+        end   = event["end"]
+        duration = end-begin
+        core = event["stream_id"]
+        m = event["m"]
+        n = event["n"]
+        k = event["k"]
+        etype = event["type"]
+        print(f"event of type {etype} on core {core} m={m}, n={n}, k={k},"
+              + f"begin {begin} end {end} (duration {duration/1000000} ms)")
+    return
+
+def get_load_at(trace, time):
+    tevents = trace.events.loc[trace.events["begin"] <= time]
+    tevents = tevents.loc[tevents["end"] >= time]
+    return tevents
+    
+
+def make_load_graph(trace, begin, end, m, n, k, points=60, title="loadgraph"):
+    tevents = trace.events
+    # grab events who ended after our beginning window
+    tevents = tevents.loc[tevents["end"] >= begin]
+    # and began before our end window
+    tevents = tevents.loc[tevents["begin"] <= end]
+    # now, for each point
+    timeslices = []
+    for i in range(points):
+        timeslice = begin
+        timeslice += ((end-begin)*i)//(points-1)
+        timeslices.append(timeslice)
+    tasks_at_time = []
+    tasks_sharing_mk_at_time = []
+    tasks_sharing_kn_at_time = []
+    tasks_sharing_mn_at_time = []
+    for timeslice in timeslices:
+        events_at_time = tevents.loc[tevents["end"] >= timeslice]
+        events_at_time = events_at_time.loc[events_at_time["begin"] <= timeslice]
+        
+        m_at_time = events_at_time.loc[events_at_time["m"] == m]
+        k_at_time = events_at_time.loc[events_at_time["k"] == k]
+        
+        mk_at_time = m_at_time.loc[m_at_time["k"] == k]
+        kn_at_time = k_at_time.loc[k_at_time["n"] == n]
+        mn_at_time = m_at_time.loc[m_at_time["n"] == n]
+        
+        tasks_at_time.append(len(events_at_time))
+        tasks_sharing_mk_at_time.append(len(mk_at_time))
+        tasks_sharing_kn_at_time.append(len(kn_at_time))
+        tasks_sharing_mn_at_time.append(len(mn_at_time))
+        
+        
+    timeslices = np.array(timeslices)
+    
+    saved_figures = []
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(timeslices/1000000, tasks_sharing_mk_at_time, "*-")
+    ax.set_title(f"({title}) trace load for {(end-begin)/1000000} ms (share mk)")
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_load_graph_share_mk.png" % title
+    plt.savefig(fname)
+    saved_figures.append(fname)
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(timeslices/1000000, tasks_sharing_kn_at_time, "*-")
+    ax.set_title(f"({title}) trace load for {(end-begin)/1000000} ms (share kn)")
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_load_graph_share_kn.png" % title
+    plt.savefig(fname)
+    saved_figures.append(fname)
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(timeslices/1000000, tasks_sharing_mn_at_time, "*-")
+    ax.set_title(f"({title}) trace load for {(end-begin)/1000000} ms (share mn)")
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_load_graph_share_mn.png" % title
+    plt.savefig(fname)
+    saved_figures.append(fname)
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(timeslices/1000000, tasks_at_time, "*-")
+    ax.set_title(f"({title}) trace load for {(end-begin)/1000000} ms (share none)")
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_load_graph_simple.png" % title
+    plt.savefig(fname)
+    saved_figures.append(fname)
+    print(f"saved figures:")
+    for figure in saved_figures:
+        print(f"    {figure}")
+    
+    
+        
+
 ################################################################################################
 # trace function
 ################################################################################################
@@ -746,12 +861,14 @@ def animate_trace(trace,
         return
         
     
-    # Guess the trace type
+    # Guess the trace type and other metadata
     trace_type = guess_trace_type(trace)
-    print("After observing your trace, I am guessing it is from the %s interface" % trace_type)
     
     running_system = guess_running_system(trace)
-    print("I think this trace is for a job that was running on", running_system)
+    
+    scheduler = trace["information"]["sched"]
+    
+    hostname = trace["information"]["hostname"]
     
     error = check_for_order_function(trace_type, order_func)
     if error == True:
@@ -762,6 +879,15 @@ def animate_trace(trace,
     if error == True:
         return
     
+    Ntiles_m = math.ceil(M/tilesize)
+    Ntiles_n = math.ceil(N/tilesize)
+    Ntiles_k = math.ceil(K/tilesize)
+    
+    expected_tasks = get_expected_tasks(task_type, running_system,
+                                        Ntiles_m, Ntiles_n, Ntiles_k,
+                                        tilesize, bigtilesize)
+    if expected_tasks is None:
+        return
     
     # Begin estimation and preprocessing
     name_to_task_num = get_work_tasks_indices(trace, task_type, running_system)
@@ -785,6 +911,24 @@ def animate_trace(trace,
     ttb = time.perf_counter()
     print("time to make df: %f seconds" % (ttb-tta))
     
+    tta = time.perf_counter()
+    orderdf = orderdf.sort_values("begin")
+    ttb = time.perf_counter()
+    print("time to sort df: %f seconds" % (ttb-tta))
+    
+    
+    warmup_runs = 0
+    if(expected_tasks != len(orderdf)):
+        print("warning: it seems like your trace has %d tasks, but I expected %d "
+                 % (len(orderdf), expected_tasks)
+                 + "based on the arguments you provided for N, M, K, and tilesize.")
+        if(len(orderdf) % expected_tasks == 0):
+            print(f"Because {len(orderdf)} % {expected_tasks} is 0, I will assume you "
+                  + f"included a warmup and I will consider the last {expected_tasks} tasks")
+            orderdf = orderdf[-expected_tasks:]
+        warmup_runs = (len(orderdf) // expected_tasks) - 1
+    
+    
     if task_type == "potrf":
         potrf_uplo = get_potrf_uplo(running_system, orderdf, name_to_task_num)
         if potrf_uplo is None:
@@ -794,10 +938,6 @@ def animate_trace(trace,
     first_begin = orderdf["begin"].min()
     last_end =  orderdf["end"].max()
         
-    Ntiles_m = math.ceil(M/tilesize)
-    Ntiles_n = math.ceil(N/tilesize)
-    Ntiles_k = math.ceil(K/tilesize)
-    
     
     time_per_frame = get_time_per_frame(first_begin, last_end, num_frames, enforce_interval)
     if time_per_frame is None:
@@ -812,11 +952,6 @@ def animate_trace(trace,
           estimated_compile_time)
     
     
-    expected_tasks = get_expected_tasks(task_type, running_system,
-                                        Ntiles_m, Ntiles_n, Ntiles_k,
-                                        tilesize, bigtilesize)
-    if expected_tasks is None:
-        return
     
     
     # This ID array is only needed for dtd traces.
@@ -964,10 +1099,14 @@ def animate_trace(trace,
                 n = task["n"]
                 k = task["k"]
                 
+            # print("core:", core)
+            # print("m", m)
+            # print("n", n)
+            # print("k", k)
+            
             # Update the sim cache
             if(core_work_tiles[core][0] != m or
                core_work_tiles[core][1] != n):
-                core_work_tiles[core] = [m, n, k] 
                 core_migrations += 1
                 if(C_status[m, n] == 0):
                     # TODO: this doesn't work for 'tasks' type runs
@@ -977,6 +1116,7 @@ def animate_trace(trace,
             else:
                 core_hits += 1
                 migrations_dict[task["id"]] = "reused"
+                
             # Update the plot
             if(plots == "c"):
                 if mode == "swaps":
@@ -995,8 +1135,9 @@ def animate_trace(trace,
                    core_work_tiles[core][1] != n):
                     E_status[m, n] += 1 / C_expected[m, n]
                 
+            core_work_tiles[core] = [m, n, k] 
+            
             # always run cache simulation, regardless of whether the migrations check is done
-            # TODO: determine which cache a task applies to
             cache_sim_dict[task["id"]] = sim_memory.access(core, m, n, k)
                 
         if(plots == "c"):
@@ -1287,13 +1428,19 @@ def animate_trace(trace,
     orderdf["duration"] = (orderdf["end"]-orderdf["begin"]) / 1000000
     orderdf = orderdf.join(migrations_df.set_index("id"), on="id")
     orderdf = orderdf.join(sim_cache_hit_df.set_index("id"), on="id")
-    # print(orderdf)
-    # print(orderdf["migrated"])
-    # TODO: left off here.
-    if(task_type == "gemm" and (which_animate in ["coreswaps", "abcprogress"])):
-       do_core_migration_plots = True
-    else:
-       do_core_migration_plots = False
+    
+    orderdf_title = f"({title})_orderdf_data.csv"
+    orderdf.to_csv(orderdf_title)
+    print(f"saved all orderdf data: {orderdf_title}")
+    
+    # Plot of the file tasks per frame
+    times_array = np.array(range(num_frames+padding_frames))*time_per_frame*1000
+    tasks_at_frame_dict = {'timestamps': times_array, 'tasks_at_frame': tasks_at_frame}
+    fname = "(%s)_tasks_per_frame.csv" % title
+    tasks_at_frame_data = pd.DataFrame(data=tasks_at_frame_dict)
+    tasks_at_frame_data.to_csv(fname)
+    print(f"saved tasks at frame data: {fname}")
+    
     migrated_df = orderdf[orderdf.loc[:,"core_memory"] == "migrated"]
     core_hit_df = orderdf[orderdf.loc[:,"core_memory"] == "reused"]
     f_access_df = orderdf[orderdf.loc[:,"core_memory"] == "first access"]
@@ -1309,11 +1456,7 @@ def animate_trace(trace,
     sim_MM_2hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 2]
     sim_MM_1hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 1]
     sim_MM_miss_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 0]
-    # print(orderdf[orderdf.loc[:,"core_memory"] == True])
-    # tasks_migrations = orderdf["core_memory"].to_numpy()
-    # print(tasks_migrations)
-    # for thing in tasks_migrations:
-        # print(thing)
+    
     tasks_times = (orderdf["duration"]).to_numpy()
     migrated_tasks_times = (migrated_df["duration"]).to_numpy()
     core_hit_tasks_times = (core_hit_df["duration"]).to_numpy()
@@ -1338,32 +1481,163 @@ def animate_trace(trace,
     eff_utilization = (tasks_execution_min * len(tasks_times)) / tasks_runtime
     num_cores = trace.information["nb_cores"]
     print("Data titled '%s'" % title)
+    print(f"interface: {trace_type}\tscheduler: {scheduler}\trunning system: {running_system}")
+    print(f"hostname: {hostname}")
     print("M=%d,\tN=%d,\tK=%d,\ttilesize=%d" % (M,N,K,tilesize))
     if(task_type == "gemm"):
         # *1000 : FLOPS/ms -> FLOPS/s
         # /1e9 : FLOPS/s -> GFLOPS/s
         print("GEMM performance: %f GFLOPS" % ((M*N*K*2)/tasks_runtime*1000/1e9))
     print()
-    I_want_to_see_task_times = False
-    if (I_want_to_see_task_times == True):
-        print("average task execution time (ms): %f" % tasks_execution_mean)
-        print("migrated: %f\treuse: %f\tfirst access: %f" %
-                (migrated_tasks_times.mean(), core_hit_tasks_times.mean(), f_access_tasks_times.mean()))
-        print("task execution time standard deviation (ms): %f" % tasks_execution_sdev)
-        print("migrated: %f\treuse: %f\tfirst access: %f" %
-                (migrated_tasks_times.std(), core_hit_tasks_times.std(), f_access_tasks_times.std()))
     print("core utilization: %f over %d cores (%4.2f%s)" % (core_utilization, num_cores, core_utilization/num_cores*100, "%"))
-    print("    (so %4.2f%s spent in scheduler)" % (((1-core_utilization/num_cores)*100), "%"))
+    print("    (so %4.2f%s price of overhead)" % (((1-core_utilization/num_cores)*100), "%"))
     print("efficiency utilization: %4.2f%s (based on the amount of time a task *should* take)"
            % (eff_utilization/num_cores*100, "%"))
     if(task_type == "gemm" and (which_animate in ["coreswaps", "abcprogress"]) and
        (core_migrations - len(C_status)*len(C_status[0]) + core_hits != 0)):
         core_migrations -= len(C_status)*len(C_status[0])
         print("GEMM core migration percentage: %2.3f%s" % ((core_migrations/(core_hits+core_migrations))*100, "%"))
+    print("average task execution time (ms): %f" % tasks_execution_mean)
     print(f"core migrations + first touches: {len(migrated_tasks_times) + len(f_access_tasks_times)}")
     print(f"simulated L2 misses: {3*len(sim_L2_miss_df)+2*len(sim_L2_1hit_df)+1*len(sim_L2_2hit_df)}")
     print(f"simulated L3 misses: {3*len(sim_L3_miss_df)+2*len(sim_L3_1hit_df)+1*len(sim_L3_2hit_df)}")
     print(f"simulated MM misses: {3*len(sim_MM_miss_df)+2*len(sim_MM_1hit_df)+1*len(sim_MM_2hit_df)}")
+    
+    preprocess_time = mid_time-start_time
+    generation_time = end_time-mid_time
+    total_time = end_time-start_time
+    print()
+    print("execution time to preprocess data: %f seconds" % (preprocess_time))
+    print("execution time to generate graphs: %f seconds" % (generation_time))
+    print("execution time total: %f seconds" % (total_time))
+    print()
+    
+    
+    # Daniel's personal stash of data:
+    runtime_data_file = open("parsec_animation_utils_data.csv", "a")
+    clean_title = title.replace(",",";")
+    runtime_data_file.write(f"\n{clean_title}, {M}, {N}, {K}, {tilesize}, {trace_type}, {warmup_runs}"
+                            f"{estimated_compile_time}, {preprocess_time}, {generation_time}, {total_time}")
+    runtime_data_file.close()
+    
+    
+    for row in C_status:
+        for element in row:
+            if element > 1.01:
+                print("error: at least one of your elements in C_status is above 1. Something went wrong!")
+                break
+    
+    if(sum(tasks_at_frame) != expected_tasks):
+        print("error: expected %d tasks but I only observed %d in the trace" %
+              (expected_tasks, sum(tasks_at_frame)))
+    
+    # print(f"len(f_access_df):{(len(f_access_df))}\t expected first accesses: {Ntiles_n * Ntiles_m}")
+    if(task_type == "gemm" and len(f_access_df) != Ntiles_n * Ntiles_m):
+        print("error: something isn't right about the first tasks policy")
+        print(f"    I counted {len(f_access_df)} first accesses but expected {Ntiles_n * Ntiles_m}!")
+    
+    
+    print()
+    
+    
+    
+    # TODO: move this into a separate function as well
+    anomalous_tasks = []
+    for index, task in orderdf[-5:].iterrows():
+        core = task["stream_id"]
+        if trace_type == "dtd":
+            tid = task["id"]
+            tid_normed = indices_arr[np.where(id_orders == tid)][0]
+            # element = ideal_order[indices_arr[tid_normed]]
+            element = ideal_order[tid_normed]
+            m = element[0]
+            n = element[1]
+            k = element[2]
+        elif trace_type == "ptg":
+            m = task["m"]
+            n = task["n"]
+            k = task["k"]
+        duration = task["duration"]
+        begin = task["begin"]
+        end = task["end"]
+        tellstr = f"    anomalous task with m={m},n={n},k={k} on core {core} from {begin} to {end} (duration {duration})"
+        anomalous_tasks.append(tellstr)
+    show_longest_tasks = False
+    if(show_longest_tasks):
+        print("unexpectedly long tasks:")
+        for tellstr in anomalous_tasks:
+            print(tellstr)
+    
+    quick_tasks = []
+    for index, task in orderdf[:5].iterrows():
+        core = task["stream_id"]
+        if trace_type == "dtd":
+            tid = task["id"]
+            tid_normed = indices_arr[np.where(id_orders == tid)][0]
+            # element = ideal_order[indices_arr[tid_normed]]
+            element = ideal_order[tid_normed]
+            m = element[0]
+            n = element[1]
+            k = element[2]
+        elif trace_type == "ptg":
+            m = task["m"]
+            n = task["n"]
+            k = task["k"]
+        duration = task["duration"]
+        begin = task["begin"]
+        end = task["end"]
+        tellstr = f"    quick task with m={m},n={n},k={k} on core {core} from {begin} to {end} (duration {duration})"
+        quick_tasks.append(tellstr)
+    show_quickest_tasks = False
+    if(show_quickest_tasks):
+        print("quickest tasks:")
+        for tellstr in quick_tasks:
+            print(tellstr)
+    
+
+    
+
+# We now prefer the targeted graphing functions
+def generate_all_old_graphs(orderdf_file, title=None):
+    if title is None:
+        title = orderdf_file[:-17]
+    orderdf = pd.read_csv(orderdf_file)
+    orderdf = orderdf.sort_values("begin")
+    migrated_df = orderdf[orderdf.loc[:,"core_memory"] == "migrated"]
+    core_hit_df = orderdf[orderdf.loc[:,"core_memory"] == "reused"]
+    f_access_df = orderdf[orderdf.loc[:,"core_memory"] == "first access"]
+    sim_L2_3hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 3]
+    sim_L2_2hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 2]
+    sim_L2_1hit_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 1]
+    sim_L2_miss_df = orderdf[orderdf.loc[:,"sim_L2_hit"] == 0]
+    sim_L3_3hit_df = orderdf[orderdf.loc[:,"sim_L3_hit"] == 3]
+    sim_L3_2hit_df = orderdf[orderdf.loc[:,"sim_L3_hit"] == 2]
+    sim_L3_1hit_df = orderdf[orderdf.loc[:,"sim_L3_hit"] == 1]
+    sim_L3_miss_df = orderdf[orderdf.loc[:,"sim_L3_hit"] == 0]
+    sim_MM_3hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 3]
+    sim_MM_2hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 2]
+    sim_MM_1hit_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 1]
+    sim_MM_miss_df = orderdf[orderdf.loc[:,"sim_MM_hit"] == 0]
+    
+    tasks_times = (orderdf["duration"]).to_numpy()
+    migrated_tasks_times = (migrated_df["duration"]).to_numpy()
+    core_hit_tasks_times = (core_hit_df["duration"]).to_numpy()
+    f_access_tasks_times = (f_access_df["duration"]).to_numpy()
+    sim_L2_1hit_tasks_times = (sim_L2_1hit_df["duration"]).to_numpy()
+    sim_L2_2hit_tasks_times = (sim_L2_2hit_df["duration"]).to_numpy()
+    sim_L2_3hit_tasks_times = (sim_L2_3hit_df["duration"]).to_numpy()
+    sim_L2_miss_tasks_times = (sim_L2_miss_df["duration"]).to_numpy()
+    sim_L3_1hit_tasks_times = (sim_L3_1hit_df["duration"]).to_numpy()
+    sim_L3_2hit_tasks_times = (sim_L3_2hit_df["duration"]).to_numpy()
+    sim_L3_3hit_tasks_times = (sim_L3_3hit_df["duration"]).to_numpy()
+    sim_L3_miss_tasks_times = (sim_L3_miss_df["duration"]).to_numpy()
+    sim_MM_1hit_tasks_times = (sim_MM_1hit_df["duration"]).to_numpy()
+    sim_MM_2hit_tasks_times = (sim_MM_2hit_df["duration"]).to_numpy()
+    sim_MM_3hit_tasks_times = (sim_MM_3hit_df["duration"]).to_numpy()
+    sim_MM_miss_tasks_times = (sim_MM_miss_df["duration"]).to_numpy()
+    tasks_execution_mean = tasks_times.mean()
+    tasks_execution_min  = tasks_times.min()
+    tasks_execution_sdev = tasks_times.std()
     
     # Prune some data for violin, pruned plots
     prune_threshold = tasks_execution_mean*5
@@ -1383,6 +1657,7 @@ def animate_trace(trace,
     pruned_sim_MM_2hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_MM_hit"] == 2]
     pruned_sim_MM_1hit_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_MM_hit"] == 1]
     pruned_sim_MM_miss_df = pruned_orderdf[pruned_orderdf.loc[:,"sim_MM_hit"] == 0]
+    
     
     ##### Again for pruned data
     pruned_migrated_tasks_times = (pruned_migrated_df["duration"]).to_numpy()
@@ -1543,6 +1818,14 @@ def animate_trace(trace,
         sMM_miss_ptt_mean = 0
         
     
+    I_want_to_see_task_times = False
+    if (I_want_to_see_task_times == True):
+        print("average task execution time (ms): %f" % tasks_execution_mean)
+        print("migrated: %f\treuse: %f\tfirst access: %f" %
+                (migrated_tasks_times.mean(), core_hit_tasks_times.mean(), f_access_tasks_times.mean()))
+        print("task execution time standard deviation (ms): %f" % tasks_execution_sdev)
+        print("migrated: %f\treuse: %f\tfirst access: %f" %
+                (migrated_tasks_times.std(), core_hit_tasks_times.std(), f_access_tasks_times.std()))
     if (I_want_to_see_task_times == True):
         print("average task execution time (ms): %f" % tasks_execution_mean)
         print("migrated: %f\treuse: %f\tfirst access: %f" % (migrated_ptt_mean, core_hit_ptt_mean, f_access_ptt_mean))
@@ -1553,23 +1836,11 @@ def animate_trace(trace,
     print("pruned graphs have removed %4.2f%s of the data (anything above %4.5fms)" %
            ((1-len(pruned_orderdf)/len(orderdf))*100, "%", prune_threshold))
     
-    print()
-    print("execution time to generate graphs: %f seconds" % (end_time-mid_time))
-    print("execution time to preprocess data: %f seconds" % (mid_time-start_time))
-    print("execution time total: %f seconds" % (end_time-start_time))
-    print()
     
-    # Plot of the file tasks per frame
-    fig, ax = plt.subplots(1, figsize = [5,5])
-    times_array = np.array(range(num_frames+padding_frames))*time_per_frame*1000
-    ax.plot(times_array, tasks_at_frame, "*-")
-    ax.set_title("tasks since each frame (%s)" % title)
-    ax.set_xlabel("time (ms)")
-    ax.set_ylabel("number of tasks")
-    fname = "tasks_per_frame_(%s).png" % title
-    plt.savefig(fname)
-    # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
+    
+
+    
+    saved_task_fnames = []
     
     
     # Plot of the task timings
@@ -1579,10 +1850,10 @@ def animate_trace(trace,
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by beginning time)")
     ax.set_ylabel("task duration (ms)")
-    fname = "tasks_times_execution_order_(%s).png" % title
+    fname = "(%s)_tasks_times_execution_order.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     # By core migrations
     fig, ax = plt.subplots(1, figsize = [5,5])
@@ -1596,10 +1867,10 @@ def animate_trace(trace,
     ax.set_xlabel("task number (sorted by beginning time)")
     ax.set_ylabel("task duration (ms)")
     plt.legend()
-    fname = "tasks_times_colored_by_migrations_(%s).png" % title
+    fname = "(%s)_tasks_times_colored_by_migrations.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     # Do it again but sort them by execution duration
     tasks_times.sort() # Now sorted by task duration
@@ -1608,10 +1879,10 @@ def animate_trace(trace,
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
-    fname = "tasks_times_sorted_(%s).png" % title
+    fname = "(%s)_tasks_times_sorted.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     
     
@@ -1625,14 +1896,17 @@ def animate_trace(trace,
     ax.set_xlabel("density")
     ax.set_ylabel("task duration (ms)")
     ax.set_xticks([])
-    fname = "tasks_times_violin_(%s).png" % title
+    fname = "(%s)_tasks_times_violin.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     
     ##### Make DF's again (sorted this time)
     pruned_orderdf = pruned_orderdf.sort_values("duration") # Now sorted by task duration
+    
+    
+            
     pruned_orderdf["new_idx"] = np.arange(len(pruned_orderdf))
     pruned_migrated_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "migrated"]
     pruned_core_hit_df = pruned_orderdf[pruned_orderdf.loc[:,"core_memory"] == "reused"]
@@ -1656,93 +1930,568 @@ def animate_trace(trace,
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
-    fname = "tasks_times_sorted_pruned_(%s).png" % title
+    fname = "(%s)_tasks_times_sorted_pruned.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     
     # and for the pruned data
     fig, ax = plt.subplots(1, figsize = [5,5])
-    ax.plot(pruned_core_hit_df["new_idx"], pruned_core_hit_df["duration"], "*", color="b", label="reused")
-    ax.plot(pruned_migrated_df["new_idx"], pruned_migrated_df["duration"], "*", color="r", label="migrated")
-    ax.plot(pruned_f_access_df["new_idx"], pruned_f_access_df["duration"], "*", color="g", label="first access")
-    ax.plot([0, max(orderdf["new_idx"])], [migrated_ptt_mean, migrated_ptt_mean], "--", color='r', label="reused mean")
-    ax.plot([0, max(orderdf["new_idx"])], [core_hit_ptt_mean, core_hit_ptt_mean], "--", color='b', label="migrated mean")
-    ax.plot([0, max(orderdf["new_idx"])], [f_access_ptt_mean, f_access_ptt_mean], "--", color='g', label="frst access mean")
+    if migrated_ptt_mean != 0:
+        ax.plot(pruned_core_hit_df["new_idx"], pruned_core_hit_df["duration"], "*", color="b", label="reused")
+        ax.plot([0, max(orderdf["new_idx"])], [migrated_ptt_mean, migrated_ptt_mean], "--", color='r', label="reused mean")
+    if core_hit_ptt_mean != 0:
+        ax.plot(pruned_migrated_df["new_idx"], pruned_migrated_df["duration"], "*", color="r", label="migrated")
+        ax.plot([0, max(orderdf["new_idx"])], [core_hit_ptt_mean, core_hit_ptt_mean], "--", color='b', label="migrated mean")
+    if f_access_ptt_mean != 0:
+        ax.plot(pruned_f_access_df["new_idx"], pruned_f_access_df["duration"], "*", color="g", label="first access")
+        ax.plot([0, max(orderdf["new_idx"])], [f_access_ptt_mean, f_access_ptt_mean], "--", color='g', label="frst access mean")
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
     plt.legend()
-    fname = "tasks_times_sorted_pruned_core_migrations(%s).png" % title
+    fname = "(%s)_tasks_times_sorted_pruned_core_migrations.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     # and for the pruned data
     fig, ax = plt.subplots(1, figsize = [5,5])
-    ax.plot(pruned_sim_L2_3hit_df["new_idx"], pruned_sim_L2_3hit_df["duration"], "*", color='b', label="sim_L2 3hit")
-    ax.plot(pruned_sim_L2_2hit_df["new_idx"], pruned_sim_L2_2hit_df["duration"], "*", color='g', label="sim_L2 2hit")
-    ax.plot(pruned_sim_L2_1hit_df["new_idx"], pruned_sim_L2_1hit_df["duration"], "*", color='y', label="sim_L2 1hit")
-    ax.plot(pruned_sim_L2_miss_df["new_idx"], pruned_sim_L2_miss_df["duration"], "*", color='r', label="sim_L2 miss")
-    ax.plot([0, max(orderdf["new_idx"])], [sL2_3hit_ptt_mean, sL2_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL2_2hit_ptt_mean, sL2_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL2_1hit_ptt_mean, sL2_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL2_miss_ptt_mean, sL2_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    if sL2_3hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L2_3hit_df["new_idx"], pruned_sim_L2_3hit_df["duration"], "*", color='b', label="sim_L2 3hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL2_3hit_ptt_mean, sL2_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sL2_2hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L2_2hit_df["new_idx"], pruned_sim_L2_2hit_df["duration"], "*", color='g', label="sim_L2 2hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL2_2hit_ptt_mean, sL2_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sL2_1hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L2_1hit_df["new_idx"], pruned_sim_L2_1hit_df["duration"], "*", color='y', label="sim_L2 1hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL2_1hit_ptt_mean, sL2_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sL2_miss_ptt_mean != 0:
+        ax.plot(pruned_sim_L2_miss_df["new_idx"], pruned_sim_L2_miss_df["duration"], "*", color='r', label="sim_L2 miss")
+        ax.plot([0, max(orderdf["new_idx"])], [sL2_miss_ptt_mean, sL2_miss_ptt_mean], "--", color='r', label="sim miss mean")
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
     plt.legend()
-    fname = "tasks_times_sorted_pruned_simulated_L2(%s).png" % title
+    fname = "(%s)_tasks_times_sorted_pruned_simulated_L2.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     fig, ax = plt.subplots(1, figsize = [5,5])
-    ax.plot(pruned_sim_L3_3hit_df["new_idx"], pruned_sim_L3_3hit_df["duration"], "*", color='b', label="sim_L3 3hit")
-    ax.plot(pruned_sim_L3_2hit_df["new_idx"], pruned_sim_L3_2hit_df["duration"], "*", color='g', label="sim_L3 2hit")
-    ax.plot(pruned_sim_L3_1hit_df["new_idx"], pruned_sim_L3_1hit_df["duration"], "*", color='y', label="sim_L3 1hit")
-    ax.plot(pruned_sim_L3_miss_df["new_idx"], pruned_sim_L3_miss_df["duration"], "*", color='r', label="sim_L3 miss")
-    ax.plot([0, max(orderdf["new_idx"])], [sL3_3hit_ptt_mean, sL3_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL3_2hit_ptt_mean, sL3_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL3_1hit_ptt_mean, sL3_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sL3_miss_ptt_mean, sL3_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    if sL3_3hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L3_3hit_df["new_idx"], pruned_sim_L3_3hit_df["duration"], "*", color='b', label="sim_L3 3hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL3_3hit_ptt_mean, sL3_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sL3_2hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L3_2hit_df["new_idx"], pruned_sim_L3_2hit_df["duration"], "*", color='g', label="sim_L3 2hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL3_2hit_ptt_mean, sL3_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sL3_1hit_ptt_mean != 0:
+        ax.plot(pruned_sim_L3_1hit_df["new_idx"], pruned_sim_L3_1hit_df["duration"], "*", color='y', label="sim_L3 1hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sL3_1hit_ptt_mean, sL3_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sL3_miss_ptt_mean != 0:
+        ax.plot(pruned_sim_L3_miss_df["new_idx"], pruned_sim_L3_miss_df["duration"], "*", color='r', label="sim_L3 miss")
+        ax.plot([0, max(orderdf["new_idx"])], [sL3_miss_ptt_mean, sL3_miss_ptt_mean], "--", color='r', label="sim miss mean")
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
     plt.legend()
-    fname = "tasks_times_sorted_pruned_simulated_L3(%s).png" % title
+    fname = "(%s)_tasks_times_sorted_pruned_simulated_L3.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
     
     fig, ax = plt.subplots(1, figsize = [5,5])
-    ax.plot(pruned_sim_MM_3hit_df["new_idx"], pruned_sim_MM_3hit_df["duration"], "*", color='b', label="sim_MM 3hit")
-    ax.plot(pruned_sim_MM_2hit_df["new_idx"], pruned_sim_MM_2hit_df["duration"], "*", color='g', label="sim_MM 2hit")
-    ax.plot(pruned_sim_MM_1hit_df["new_idx"], pruned_sim_MM_1hit_df["duration"], "*", color='y', label="sim_MM 1hit")
-    ax.plot(pruned_sim_MM_miss_df["new_idx"], pruned_sim_MM_miss_df["duration"], "*", color='r', label="sim_MM miss")
-    ax.plot([0, max(orderdf["new_idx"])], [sMM_3hit_ptt_mean, sMM_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sMM_2hit_ptt_mean, sMM_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sMM_1hit_ptt_mean, sMM_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
-    ax.plot([0, max(orderdf["new_idx"])], [sMM_miss_ptt_mean, sMM_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    if sMM_3hit_ptt_mean != 0:
+        ax.plot(pruned_sim_MM_3hit_df["new_idx"], pruned_sim_MM_3hit_df["duration"], "*", color='b', label="sim_MM 3hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sMM_3hit_ptt_mean, sMM_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sMM_2hit_ptt_mean != 0:
+        ax.plot(pruned_sim_MM_2hit_df["new_idx"], pruned_sim_MM_2hit_df["duration"], "*", color='g', label="sim_MM 2hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sMM_2hit_ptt_mean, sMM_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sMM_1hit_ptt_mean != 0:
+        ax.plot(pruned_sim_MM_1hit_df["new_idx"], pruned_sim_MM_1hit_df["duration"], "*", color='y', label="sim_MM 1hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sMM_1hit_ptt_mean, sMM_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sMM_miss_ptt_mean != 0:
+        ax.plot(pruned_sim_MM_miss_df["new_idx"], pruned_sim_MM_miss_df["duration"], "*", color='r', label="sim_MM miss")
+        ax.plot([0, max(orderdf["new_idx"])], [sMM_miss_ptt_mean, sMM_miss_ptt_mean], "--", color='r', label="sim miss mean")
     ax.set_title("Timing of Each Task (%s)" % title)
     ax.set_xlabel("task number (sorted by task duration)")
     ax.set_ylabel("task duration (ms)")
     plt.legend()
-    fname = "tasks_times_sorted_pruned_simulated_MM(%s).png" % title
+    fname = "(%s)_tasks_times_sorted_pruned_simulated_MM.png" % title
     plt.savefig(fname)
+    saved_task_fnames.append(fname)
     # Offer the user the filename in case they wish to display it after
-    print("saved task metadata file:", fname)
+    
+    window_size = pruned_orderdf.shape[0]//4*3 # 3/4 of the len of the dataframe
+    windowed_orderdf = pruned_orderdf[:window_size]
+    windowed_migrated_df = windowed_orderdf[windowed_orderdf.loc[:,"core_memory"] == "migrated"]
+    windowed_core_hit_df = windowed_orderdf[windowed_orderdf.loc[:,"core_memory"] == "reused"]
+    windowed_f_access_df = windowed_orderdf[windowed_orderdf.loc[:,"core_memory"] == "first access"]
+    windowed_sim_L2_3hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L2_hit"] == 3]
+    windowed_sim_L2_2hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L2_hit"] == 2]
+    windowed_sim_L2_1hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L2_hit"] == 1]
+    windowed_sim_L2_miss_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L2_hit"] == 0]
+    windowed_sim_L3_3hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L3_hit"] == 3]
+    windowed_sim_L3_2hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L3_hit"] == 2]
+    windowed_sim_L3_1hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L3_hit"] == 1]
+    windowed_sim_L3_miss_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_L3_hit"] == 0]
+    windowed_sim_MM_3hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_MM_hit"] == 3]
+    windowed_sim_MM_2hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_MM_hit"] == 2]
+    windowed_sim_MM_1hit_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_MM_hit"] == 1]
+    windowed_sim_MM_miss_df = windowed_orderdf[windowed_orderdf.loc[:,"sim_MM_hit"] == 0]
+    
+    # Do it again but sort them by execution duration
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    ax.plot(windowed_orderdf["new_idx"], windowed_orderdf["duration"], "*")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by task duration)")
+    ax.set_ylabel("task duration (ms)")
+    fname = "(%s)_tasks_times_sorted_windowed.png" % title
+    plt.savefig(fname)
+    saved_task_fnames.append(fname)
+    # Offer the user the filename in case they wish to display it after
     
     
-    if(sum(tasks_at_frame) != expected_tasks):
-        print("error: expected %d tasks but I only observed %d in the trace" %
-              (expected_tasks, sum(tasks_at_frame)))
+    # and for the windowed data
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    if migrated_ptt_mean != 0:
+        ax.plot(windowed_core_hit_df["new_idx"], windowed_core_hit_df["duration"], "*", color="b", label="reused")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [migrated_ptt_mean, migrated_ptt_mean], "--", color='r', label="reused mean")
+    if core_hit_ptt_mean != 0:
+        ax.plot(windowed_migrated_df["new_idx"], windowed_migrated_df["duration"], "*", color="r", label="migrated")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [core_hit_ptt_mean, core_hit_ptt_mean], "--", color='b', label="migrated mean")
+    if f_access_ptt_mean != 0:
+        ax.plot(windowed_f_access_df["new_idx"], windowed_f_access_df["duration"], "*", color="g", label="first access")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [f_access_ptt_mean, f_access_ptt_mean], "--", color='g', label="frst access mean")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by task duration)")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = "(%s)_tasks_times_sorted_windowed_core_migrations.png" % title
+    plt.savefig(fname)
+    saved_task_fnames.append(fname)
+    # Offer the user the filename in case they wish to display it after
     
-    # print(f"len(f_access_df):{(len(f_access_df))}\t expected first accesses: {Ntiles_n * Ntiles_m}")
-    if(task_type == "gemm" and len(f_access_df) != Ntiles_n * Ntiles_m):
-        print("error: something isn't right about the first tasks policy")
-        print(f"    I counted {len(f_access_df)} first accesses but expected {Ntiles_n * Ntiles_m}!")
+    # and for the windowed data
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    if sL2_3hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L2_3hit_df["new_idx"], windowed_sim_L2_3hit_df["duration"], "*", color='b', label="sim_L2 3hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL2_3hit_ptt_mean, sL2_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sL2_2hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L2_2hit_df["new_idx"], windowed_sim_L2_2hit_df["duration"], "*", color='g', label="sim_L2 2hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL2_2hit_ptt_mean, sL2_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sL2_1hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L2_1hit_df["new_idx"], windowed_sim_L2_1hit_df["duration"], "*", color='y', label="sim_L2 1hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL2_1hit_ptt_mean, sL2_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sL2_miss_ptt_mean != 0:
+        ax.plot(windowed_sim_L2_miss_df["new_idx"], windowed_sim_L2_miss_df["duration"], "*", color='r', label="sim_L2 miss")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL2_miss_ptt_mean, sL2_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by task duration)")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = "(%s)_tasks_times_sorted_windowed_simulated_L2.png" % title
+    plt.savefig(fname)
+    saved_task_fnames.append(fname)
+    # Offer the user the filename in case they wish to display it after
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    if sL3_3hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L3_3hit_df["new_idx"], windowed_sim_L3_3hit_df["duration"], "*", color='b', label="sim_L3 3hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL3_3hit_ptt_mean, sL3_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sL3_2hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L3_2hit_df["new_idx"], windowed_sim_L3_2hit_df["duration"], "*", color='g', label="sim_L3 2hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL3_2hit_ptt_mean, sL3_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sL3_1hit_ptt_mean != 0:
+        ax.plot(windowed_sim_L3_1hit_df["new_idx"], windowed_sim_L3_1hit_df["duration"], "*", color='y', label="sim_L3 1hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL3_1hit_ptt_mean, sL3_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sL3_miss_ptt_mean != 0:
+        ax.plot(windowed_sim_L3_miss_df["new_idx"], windowed_sim_L3_miss_df["duration"], "*", color='r', label="sim_L3 miss")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sL3_miss_ptt_mean, sL3_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by task duration)")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = "(%s)_tasks_times_sorted_windowed_simulated_L3.png" % title
+    plt.savefig(fname)
+    saved_task_fnames.append(fname)
+    # Offer the user the filename in case they wish to display it after
+    
+    fig, ax = plt.subplots(1, figsize = [5,5])
+    if sMM_3hit_ptt_mean != 0:
+        ax.plot(windowed_sim_MM_3hit_df["new_idx"], windowed_sim_MM_3hit_df["duration"], "*", color='b', label="sim_MM 3hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sMM_3hit_ptt_mean, sMM_3hit_ptt_mean], "--", color='b', label="sim 3hit mean")
+    if sMM_2hit_ptt_mean != 0:
+        ax.plot(windowed_sim_MM_2hit_df["new_idx"], windowed_sim_MM_2hit_df["duration"], "*", color='g', label="sim_MM 2hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sMM_2hit_ptt_mean, sMM_2hit_ptt_mean], "--", color='g', label="sim 2hit mean")
+    if sMM_1hit_ptt_mean != 0:
+        ax.plot(windowed_sim_MM_1hit_df["new_idx"], windowed_sim_MM_1hit_df["duration"], "*", color='y', label="sim_MM 1hit")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sMM_1hit_ptt_mean, sMM_1hit_ptt_mean], "--", color='y', label="sim 1hit mean")
+    if sMM_miss_ptt_mean != 0:
+        ax.plot(windowed_sim_MM_miss_df["new_idx"], windowed_sim_MM_miss_df["duration"], "*", color='r', label="sim_MM miss")
+        ax.plot([0, max(windowed_orderdf["new_idx"])], [sMM_miss_ptt_mean, sMM_miss_ptt_mean], "--", color='r', label="sim miss mean")
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel("task number (sorted by task duration)")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = "(%s)_tasks_times_sorted_windowed_simulated_MM.png" % title
+    plt.savefig(fname)
+    saved_task_fnames.append(fname)
+    # Offer the user the filename in case they wish to display it after
+    
+    print("saved metadata files:")
+    for fname in saved_task_fnames:
+        print("    %s" % fname)
+
+        
+def generate_core_migrations_graph(orderdf_file, title=None, window=1.0, figsize = [5,5], sortby=None, show_means = False):
+    if title is None:
+        title = orderdf_file[:-17]
+        title = title.replace(")","").replace("(","")
+    acceptable_sortbys = ["begin", "duration"]
+    if sortby is None or sortby not in acceptable_sortbys:
+        print(f"Error: invalid sortby. Must pass one of `sortby={acceptable_sortbys}`")
+        return None
+    if window > 1.0 or window <= 0:
+        print("Error: window must be in (0,1]")
+        
+    orderdf = pd.read_csv(orderdf_file)
+    orderdf = orderdf.sort_values(sortby)
+    orderdf["new_idx"] = np.arange(len(orderdf))
+    
+    # First, calculate mean before windowing
+    
+    # Consider smushing these lines into the next set
+    f_access_df = orderdf[orderdf.loc[:,"core_memory"] == "first access"]
+    core_hit_df = orderdf[orderdf.loc[:,"core_memory"] == "reused"]
+    migrated_df = orderdf[orderdf.loc[:,"core_memory"] == "migrated"]
+    
+    f_access_tasks_times = f_access_df["duration"].to_numpy()
+    core_hit_tasks_times = core_hit_df["duration"].to_numpy()
+    migrated_tasks_times = migrated_df["duration"].to_numpy()
+        
+    if(len(f_access_tasks_times) > 0):
+        f_access_tt_mean = f_access_tasks_times.mean()
+    else:
+        f_access_tt_mean = 0
+    if(len(core_hit_tasks_times) > 0):
+        core_hit_tt_mean = core_hit_tasks_times.mean()
+    else:
+        core_hit_tt_mean = 0
+    if(len(migrated_tasks_times) > 0):
+        migrated_tt_mean = migrated_tasks_times.mean()
+    else:
+        migrated_tt_mean = 0
+
     
     
-    print()
+    data_window_cutoff = int(window*len(orderdf))
+    orderdf = orderdf[:data_window_cutoff]
+    
+    f_access_df = orderdf[orderdf.loc[:,"core_memory"] == "first access"]
+    core_hit_df = orderdf[orderdf.loc[:,"core_memory"] == "reused"]
+    migrated_df = orderdf[orderdf.loc[:,"core_memory"] == "migrated"]
+    
+    fig, ax = plt.subplots(1, figsize = figsize)
+    if f_access_tt_mean != 0:
+        ax.plot(f_access_df["new_idx"], f_access_df["duration"], "*", color='g', label=f"first access")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [f_access_tt_mean, f_access_tt_mean], "--", color='g', label="first access mean")
+    if core_hit_tt_mean != 0:
+        ax.plot(core_hit_df["new_idx"], core_hit_df["duration"], "*", color='b', label=f"reused")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [core_hit_tt_mean, core_hit_tt_mean], "--", color='b', label="reused mean")
+    if migrated_tt_mean != 0:
+        ax.plot(migrated_df["new_idx"], migrated_df["duration"], "*", color='r', label=f"migrated")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [migrated_tt_mean, migrated_tt_mean], "--", color='r', label="migrated mean")
+        
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel(f"task number (sorted by task {sortby})")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = f"({title})_tasks_times_sorted_{sortby}_core_migrations_windowed_{window}.png"
+    plt.savefig(fname)
+    return fname
+
+def generate_simulated_cache_hit_graph(orderdf_file, title=None, cache=None, window=1.0, figsize = [5,5], sortby=None,
+                                       show_means = False):
+    if title is None:
+        title = orderdf_file[:-17]
+        title = title.replace(")","").replace("(","")
+    acceptable_caches = ["L2", "L3", "MM"]
+    if cache is None or cache not in acceptable_caches:
+        print(f"Error: invalid cache. Must pass one of `cache={acceptable_caches}`")
+        return None
+    acceptable_sortbys = ["begin", "duration"]
+    if sortby is None or sortby not in acceptable_sortbys:
+        print(f"Error: invalid sortby. Must pass one of `sortby={acceptable_sortbys}`")
+        return None
+    if window > 1.0 or window <= 0:
+        print("Error: window must be in (0,1]")
+        
+    orderdf = pd.read_csv(orderdf_file)
+    orderdf = orderdf.sort_values(sortby)
+    orderdf["new_idx"] = np.arange(len(orderdf))
+    
+    # First, calculate mean before windowing
+    
+    # Consider smushing these four lines into the next four
+    sim_SC_3hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 3]
+    sim_SC_2hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 2]
+    sim_SC_1hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 1]
+    sim_SC_0hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 0]
+    
+    print("3 hits:", len(sim_SC_3hit_df))
+    print("2 hits:", len(sim_SC_2hit_df))
+    print("1 hits:", len(sim_SC_1hit_df))
+    print("1 hits:", len(sim_SC_0hit_df))
+    
+    sim_SC_3hit_tasks_times = sim_SC_3hit_df["duration"].to_numpy()
+    sim_SC_2hit_tasks_times = sim_SC_2hit_df["duration"].to_numpy()
+    sim_SC_1hit_tasks_times = sim_SC_1hit_df["duration"].to_numpy()
+    sim_SC_0hit_tasks_times = sim_SC_0hit_df["duration"].to_numpy()
+        
+    if(len(sim_SC_3hit_tasks_times) > 0):
+        sim_SC_3hit_tt_mean = sim_SC_3hit_tasks_times.mean()
+    else:
+        sim_SC_3hit_tt_mean = 0
+    if(len(sim_SC_2hit_tasks_times) > 0):
+        sim_SC_2hit_tt_mean = sim_SC_2hit_tasks_times.mean()
+    else:
+        sim_SC_2hit_tt_mean = 0
+    if(len(sim_SC_1hit_tasks_times) > 0):
+        sim_SC_1hit_tt_mean = sim_SC_1hit_tasks_times.mean()
+    else:
+        sim_SC_1hit_tt_mean = 0
+    if(len(sim_SC_0hit_tasks_times) > 0):
+        sim_SC_0hit_tt_mean = sim_SC_0hit_tasks_times.mean()
+    else:
+        sim_SC_0hit_tt_mean = 0
+
+    
+    
+    data_window_cutoff = int(window*len(orderdf))
+    orderdf = orderdf[:data_window_cutoff]
+    
+    sim_SC_3hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 3]
+    sim_SC_2hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 2]
+    sim_SC_1hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 1]
+    sim_SC_0hit_df = orderdf[orderdf.loc[:,f"sim_{cache}_hit"] == 0]
+    
+    fig, ax = plt.subplots(1, figsize = figsize)
+    """ # reversed order
+    if sim_SC_3hit_tt_mean != 0:
+        ax.plot(sim_SC_3hit_df["new_idx"], sim_SC_3hit_df["duration"], "*", color='b', label=f"sim_{cache} 3hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sim_SC_3hit_tt_mean, sim_SC_3hit_tt_mean], "--", color='b', label="sim 3hit mean")
+    if sim_SC_2hit_tt_mean != 0:
+        ax.plot(sim_SC_2hit_df["new_idx"], sim_SC_2hit_df["duration"], "*", color='g', label=f"sim_{cache} 2hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sim_SC_2hit_tt_mean, sim_SC_2hit_tt_mean], "--", color='g', label="sim 2hit mean")
+    if sim_SC_1hit_tt_mean != 0:
+        ax.plot(sim_SC_1hit_df["new_idx"], sim_SC_1hit_df["duration"], "*", color='y', label=f"sim_{cache} 1hit")
+        ax.plot([0, max(orderdf["new_idx"])], [sim_SC_1hit_tt_mean, sim_SC_1hit_tt_mean], "--", color='y', label="sim 1hit mean")
+    if sim_SC_0hit_tt_mean != 0:
+        ax.plot(sim_SC_0hit_df["new_idx"], sim_SC_0hit_df["duration"], "*", color='r', label=f"sim_{cache} miss")
+        ax.plot([0, max(orderdf["new_idx"])], [sim_SC_0hit_tt_mean, sim_SC_0hit_tt_mean], "--", color='r', label="sim miss mean")
+    """ 
+    if sim_SC_0hit_tt_mean != 0:
+        ax.plot(sim_SC_0hit_df["new_idx"], sim_SC_0hit_df["duration"], "*", color='r', label=f"sim_{cache} miss")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [sim_SC_0hit_tt_mean, sim_SC_0hit_tt_mean], "--", color='r', label="sim miss mean")
+    if sim_SC_1hit_tt_mean != 0:
+        ax.plot(sim_SC_1hit_df["new_idx"], sim_SC_1hit_df["duration"], "*", color='y', label=f"sim_{cache} 1hit")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [sim_SC_1hit_tt_mean, sim_SC_1hit_tt_mean], "--", color='y', label="sim 1hit mean")
+    if sim_SC_2hit_tt_mean != 0:
+        ax.plot(sim_SC_2hit_df["new_idx"], sim_SC_2hit_df["duration"], "*", color='g', label=f"sim_{cache} 2hit")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [sim_SC_2hit_tt_mean, sim_SC_2hit_tt_mean], "--", color='g', label="sim 2hit mean")
+    if sim_SC_3hit_tt_mean != 0:
+        ax.plot(sim_SC_3hit_df["new_idx"], sim_SC_3hit_df["duration"], "*", color='b', label=f"sim_{cache} 3hit")
+        if show_means == True:
+            ax.plot([0, max(orderdf["new_idx"])], [sim_SC_3hit_tt_mean, sim_SC_3hit_tt_mean], "--", color='b', label="sim 3hit mean")
+        
+    ax.set_title("Timing of Each Task (%s)" % title)
+    ax.set_xlabel(f"task number (sorted by task {sortby})")
+    ax.set_ylabel("task duration (ms)")
+    plt.legend()
+    fname = f"({title})_tasks_times_sorted_{sortby}_simulated_{cache}_windowed_{window}.png"
+    plt.savefig(fname)
+    return fname
+        
+def core_of_task(orderdf_file, m, n, k):
+    data = pd.read_csv(orderdf_file)
+    data_m = data.loc[data["m"] == m]
+    data_mn = data_m.loc[data_m["n"] == n]
+    data_mnk = data_mn.loc[data_mn["k"] == k]
+    core = data_mnk["stream_id"].iloc[0]
+    return core
+    
+def print_tasks_before_and_after(orderdf_file, m, n, k, withTime = True):
+    data = pd.read_csv(orderdf_file)
+    data_m = data.loc[data["m"] == m]
+    data_mn = data_m.loc[data_m["n"] == n]
+    data_mnk = data_mn.loc[data_mn["k"] == k]
+    core = data_mnk["stream_id"].iloc[0]
+    begin = data_mnk["begin"].iloc[0]
+    end = data_mnk["end"].iloc[0]
+    
+    data_sid = data.loc[data["stream_id"] == core]
+    tasks_before = data_sid.loc[data_sid["end"] < begin].sort_values("end")
+    tasks_after  = data_sid.loc[data_sid["begin"] > end].sort_values("begin")
+    
+    try:
+        task_before = tasks_before.iloc[-1]
+    except IndexError:
+        task_before = {"m": None, "n": None, "k": None, "begin": None, "end": None}
+    try:
+        task_after = tasks_after.iloc[0]
+    except IndexError:
+        task_after = {"m": None, "n": None, "k": None, "begin": None, "end": None}
+    
+    if(withTime):
+        print(f"before: m={task_before['m']} n={task_before['n']} k={task_before['k']} "
+              f"begin={task_before['begin']} end={task_before['end']}")
+        print(f"task:   m={m} n={n} k={k} begin={begin} end={end}")
+        print(f"after:  m={task_after['m']} n={task_after['n']} k={task_after['k']} "
+              f"begin={task_after['begin']} end={task_after['end']}")
+    else:
+        print(f"before: m={task_before['m']} n={task_before['n']} k={task_before['k']}")
+        print(f"task:   m={m} n={n} k={k}")
+        print(f"after:  m={task_after['m']} n={task_after['n']} k={task_after['k']}")
+
+def print_read_of(trace, m, n, k, withTime = True, problem_size=24):
+    events = trace["events"]
+    # Possible TODO: find the task numbers more realistically
+    # hardcoded to take only the last handful of events (last round)
+    readA = (events.loc[events['type'] == 23].sort_values("begin")).iloc[-problem_size*problem_size:]
+    readB = (events.loc[events['type'] == 21].sort_values("begin")).iloc[-problem_size*problem_size:]
+    data  = (events.loc[events['type'] == 19].sort_values("begin")).iloc[-problem_size*problem_size*problem_size:]
+    
+    data_m = data.loc[data["m"] == m]
+    data_mn = data_m.loc[data_m["n"] == n]
+    data_mnk = data_mn.loc[data_mn["k"] == k]
+    core = data_mnk["stream_id"].iloc[0]
+    begin = data_mnk["begin"].iloc[0]
+    end = data_mnk["end"].iloc[0]
+    
+    readA_m = readA.loc[readA["m"] == m]
+    readA_mk = readA_m.loc[readA_m["k"] == k]
+    coreA = readA_mk["stream_id"].iloc[0]
+    beginA = readA_mk["begin"].iloc[0]
+    endA = readA_mk["end"].iloc[0]
+    
+    readB_k = readB.loc[readB["k"] == k]
+    readB_kn = readB_k.loc[readB_k["n"] == n]
+    coreB = readB_kn["stream_id"].iloc[0]
+    beginB = readB_kn["begin"].iloc[0]
+    endB = readB_kn["end"].iloc[0]
+    
+    print(f"Read A: core={coreA} begin={beginA} end={endA}")
+    print(f"Read B: core={coreB} begin={beginB} end={endB}")
+    print(f"task:   core={core} m={m} n={n} k={k} begin={begin} end={end}")
+    
+    
+# TODO: fix this algorithmnically slow and inefficient function
+def print_all_migrated_tasks(orderdf_file):
+    data = pd.read_csv(orderdf_file)
+    migrated_tasks = data.loc[data["core_memory"] == "migrated"].sort_values("begin")
+    for index, task in migrated_tasks.iterrows():
+        print(f"MIGRATED TASK on core {task['stream_id']}")
+        print("==================================")
+        print_tasks_before_and_after(orderdf_file, task["m"], task["n"], task["k"], withTime=True)
+        print()
+        
+
+def tasks_migrated_because_blocked(trace, orderdf_file, problem_size=24):
+    # Possible TODO: find the task numbers more realistically
+    # hardcoded to take only the last handful of events (last round)
+    events = trace["events"]
+    readA = (events.loc[events['type'] == 23].sort_values("begin")).iloc[-problem_size*problem_size:]
+    readB = (events.loc[events['type'] == 21].sort_values("begin")).iloc[-problem_size*problem_size:]
+    data = pd.read_csv(orderdf_file)
+    migrated_tasks = data.loc[data["core_memory"] == "migrated"].sort_values("begin")
+    bbr_count = 0
+    not_bbr_count = 0
+    for index, task in migrated_tasks.iterrows():
+        print(f"MIGRATED TASK on core {task['stream_id']}")
+        print("==================================")
+        print_tasks_before_and_after(orderdf_file, task["m"], task["n"], task["k"], withTime=True)
+        bbr = task_blocked_by_read(data, readA, readB, task["m"], task["n"], task["k"])
+        if(bbr):
+            print("blocked by read")
+            bbr_count += 1
+        else:
+            print("NOT blocked by read")
+            not_bbr_count += 1
+        
+        print()
+    print(f"blocked by read: {bbr_count} not blocked by read: {not_bbr_count}")
+    
+def task_blocked_by_read(data, readA, readB, m, n, k):
+    # find the task that precedes this one in the DAG (it's the k-1th task)
+    data_m = data.loc[data["m"] == m]
+    data_mn = data_m.loc[data_m["n"] == n]
+    data_mnk = data_mn.loc[data_mn["k"] == k-1]
+    core = data_mnk["stream_id"].iloc[0]
+    end_prev = data_mnk["end"].iloc[0]
+    
+    readA_m = readA.loc[readA["m"] == m]
+    readA_mk = readA_m.loc[readA_m["k"] == k]
+    coreA = readA_mk["stream_id"].iloc[0]
+    beginA = readA_mk["begin"].iloc[0]
+    endA = readA_mk["end"].iloc[0]
+    
+    readB_k = readB.loc[readB["k"] == k]
+    readB_kn = readB_k.loc[readB_k["n"] == n]
+    coreB = readB_kn["stream_id"].iloc[0]
+    beginB = readB_kn["begin"].iloc[0]
+    endB = readB_kn["end"].iloc[0]
+    
+    if(endB >= end_prev or endA >= end_prev):
+        return True
+    return False
+    
+    
+        
+def generate_tasks_per_frame_graph(datafile, title=None, figsize = [5,5]):
+    if title is None:
+        title = datafile[:-20]
+    
+    data = pd.read_csv(datafile)
+    times_array = data["timestamps"]
+    tasks_at_frame = data["tasks_at_frame"]
+    fig, ax = plt.subplots(1, figsize = figsize)
+    ax.plot(times_array, tasks_at_frame, "*-")
+    ax.set_title("tasks since each frame (%s)" % title)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_tasks_per_frame.png" % title
+    plt.savefig(fname)
+    # print(f"saved figure {fname}")
+    return fname
+
+
+# TODO: finish functions that display side-by-side data
+def generate_tasks_per_frame_graphs(datafiles, title=None, figsize = [5,5]):
+    if title is None:
+        print("Title cannot be none. Please pass `title='...'`")
+    
+    
+    ngraphs = len(datafiles)
+    
+    fig, axes = plt.subplots(ngraphs, figsize = figsize)
+    
+    data = pd.read_csv(datafile)
+    times_array = data["timestamps"]
+    tasks_at_frame = data["tasks_at_frame"]
+    axtitle = datafile[:-20]
+    ax.plot(times_array, tasks_at_frame, "*-")
+    ax.set_title("tasks since each frame (%s)" % axtitle)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("number of tasks")
+    fname = "(%s)_tasks_per_frame.png" % title
+    plt.savefig(fname)
+    # print(f"saved figure {fname}")
+    return fname
