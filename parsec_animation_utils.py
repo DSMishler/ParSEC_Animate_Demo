@@ -1,5 +1,19 @@
 # Daniel Mishler
-# Last push to github 2022-03-27
+# Last push to github 2022-05-25
+
+################################################################################
+# PaRSEC Animation Utils                                                       #
+################################################################################
+"""
+Hello, if you're planning to use this code for any of your projects or need
+any help, feel free to reach out to me at dsmishler@icl.utk.edu, and I should
+get back to you in a few days. I'd be happy to help, fix a bug, extend the code,
+optimize it, or clean it up!
+"""
+
+
+
+
 
 # TODO: should I sort the tasks before parsing them *within* a frame?
 # Just because I haven't seen a bug doesn't mean it's not possiblle...
@@ -175,19 +189,7 @@ def recursive_order_generator(Ntiles_m, Ntiles_n, Ntiles_k, square_size = 8):
 ################################################################################################
 # helper functions to make the animation function itself shorter and more readable
 ################################################################################################
-def check_parameters_basic(M, N, K, tilesize, fill, which_animate):
-    if M is None:
-        print("Error: must provide argument for M")
-        return True
-    if N is None:
-        print("Error: must provide argument for N")
-        return True
-    if K is None:
-        print("Error: must provide argument for K (even if you don't think it makes sense in the problem!)")
-        return True
-    if tilesize is None:
-        print("Error: must provide argument for tilesize (even if you don't think it makes sense in the problem!)")
-        return True
+def check_parameters_basic(fill, which_animate):
     legal_fills = ["relative", "absolute"]
     if fill not in legal_fills:
         print("Error: fill must be in", legal_fills)
@@ -198,6 +200,98 @@ def check_parameters_basic(M, N, K, tilesize, fill, which_animate):
         return True
     return False
 
+def get_mnk(trace, M, N, K, tilesize):
+    # Check and see if the trace can provide any of these parameters
+    try:
+        trace_M = trace['information']["PARAM_M"]
+    except KeyError:
+        trace_M = None
+    try:
+        trace_N = trace['information']["PARAM_N"]
+    except KeyError:
+        trace_N = None
+    try:
+        trace_K = trace['information']["PARAM_K"]
+    except KeyError:
+        trace_K = None
+    try:
+        trace_NB = trace['information']["PARAM_NB"]
+    except KeyError:
+        trace_NB = None
+    # Behavior:
+        # If user provides M and it is in trace, make sure they match
+        # If user provides M and it not in trace, take user's word
+        # If user does not provide M and it is in trace, take trace's word
+        # If user does not provide M and it is not in trace, error out
+    # Do the same with N, K, and tilesize
+    error = False
+    if (M is None):
+        if (trace_M is None):
+            error = True
+            print("neither user nor trace provided parameter M")
+        else: # Trace_M is not None
+            M = trace_M
+            print(f"M = {M}")
+    else: # M is not none
+        if (trace_M is None):
+            pass
+        else:
+            if(M != trace_M):
+                print(f"error! The M you provided does not match the trace's M " +
+                      f"({trace_M}). I quit!")
+                error = True
+    # N
+    if (N is None):
+        if (trace_N is None):
+            error = True
+            print("neither user nor trace provided parameter N")
+        else: # Trace_N is not None
+            N = trace_N
+            print(f"N = {N}")
+    else: # N is not none
+        if (trace_N is None):
+            pass
+        else:
+            if(N != trace_N):
+                print(f"error! The N you provided does not match the trace's N " +
+                      f"({trace_N}). I quit!")
+                error = True
+    # K
+    if (K is None):
+        if (trace_K is None):
+            error = True
+            print("neither user nor trace provided parameter K")
+        else: # Trace_K is not None
+            K = trace_K
+            print(f"K = {K}")
+    else: # K is not none
+        if (trace_K is None):
+            pass
+        else:
+            if(K != trace_K):
+                print(f"error! The K you provided does not match the trace's K " +
+                      f"({trace_K}). I quit!")
+                error = True
+    # Tilesize
+    if (tilesize is None):
+        if (trace_NB is None):
+            error = True
+            print("neither user nor trace provided parameter tilesize")
+        else: # Trace_NB is not None
+            tilesize = trace_NB
+            print(f"tilesize = {tilesize}")
+    else: # tilesize is not none
+        if (trace_NB is None):
+            pass
+        else:
+            if(tilesize != trace_NB):
+                print(f"error! The tilesize you provided does not match the trace's tilesize " +
+                      f"({trace_NB}). I quit!")
+                error = True
+    
+    return (M, N, K, tilesize, error)
+   
+    
 def guess_trace_type(trace):
     # TODO: Make a more sophisticated guess
     runline = trace.information["exe"]
@@ -261,12 +355,43 @@ def get_work_tasks_indices(trace, task_type, running_system):
     name_to_task_num = {}
     if task_type == "gemm":
         gemm_index_found = 0
-        for name in trace.event_types.index: # An array of numbers indexed by their name. Interesting, huh?
+        for name in trace.event_names:
             if "gemm" in name.lower():
                 name_to_task_num["gemm"] = trace.event_types[name]
                 gemm_index_found += 1
-                break
-        if gemm_index_found != 1:
+        if gemm_index_found > 1: # if more than 1 GEMM task
+            # name_to_task_num["gemm"] = 20
+            gemm_index_found = 0
+            for name in trace.event_names:
+                if "gemm" in name.lower():
+                    print(f"considering event type {trace.event_types[name]} ({name})")
+                    one_event = trace.events[trace.events.type == trace.event_types[name]]
+                    # TODO: this takes FOREVER
+                    one_event = one_event[:1]
+                    if(len(one_event) == 0):
+                        continue
+                    # print("the event:")
+                    # print(one_event)
+                    # print("m", one_event["m"].iloc[0])
+                    # print("n", one_event["n"].iloc[0])
+                    # print("k", one_event["k"].iloc[0])
+                    if(one_event["k"].iloc[0] is None):
+                        continue
+                    if(one_event["m"].iloc[0] is None):
+                        continue
+                    if(one_event["n"].iloc[0] is None):
+                        continue
+                    # print(f"event type {trace.event_types[name]} works")
+                    gemm_index_found += 1
+                    name_to_task_num["gemm"] = trace.event_types[name]
+        if gemm_index_found > 1: # if more than 1 GEMM task WORKS
+            print("Error: more than 1 GEMM task works for you. I can't move forward")
+            print("See your trace `trace.event_types` to see what I mean.")
+            print("You also need to implement me as a parameter >:)")
+            return None
+                                             
+                
+        if gemm_index_found < 1:
             print("Error: file trace does not have its event_types set properly")
             print("found %d events, expected %d" % (gemm_index_found, 1))
             return None
@@ -822,7 +947,7 @@ def make_load_graph(trace, begin, end, m, n, k, points=60, title="loadgraph"):
 # reveals that the the core working on this tile of C previously worked on a
 # different tile, then we know a cache miss was guaranteed.
 
-def animate_trace(trace, 
+def animate_trace(traces, 
                   task_type,
                   order_func = None,
                   which_animate = "tasks",
@@ -831,11 +956,13 @@ def animate_trace(trace,
                   enforce_interval = None, # Alternatively, determines a timestep per frame (in seconds)
                   fps = 13,
                   fill = "relative", # relative for all will be yellow, absolute for some will be fully yellow
-                  M = None, # Must be provided
-                  N = None, # Must be provided
-                  K = None, # Must be provided (even if the geometry of the matrix doesn't make sense for it)
-                  tilesize = None, # Must be provided
-                  bigtilesize = None # Optional
+                  M = None, # Need not be provided
+                  N = None, # Need not be provided
+                  K = None, # Need not be provided (even if the geometry of the matrix doesn't make sense for it)
+                  tilesize = None, # Need not be provided
+                  bigtilesize = None, # Optional
+                  do_cache_sim = True, # Optional
+                  task_to_trace = None
                  ):
     
     global A_status
@@ -855,8 +982,25 @@ def animate_trace(trace,
     start_time = time.perf_counter()
     print("Beginning animation of data '%s' method '%s'" % (title, which_animate))
     
+    if(type(traces) is list):
+        print("Passed multiple traces. Concatenating them.")
+        future_trace = trace[0]
+        traces_data = []
+        for t in trace:
+            traces_data.append(t['events'])
+        future_trace['events'] = pd.concat(traces_data)
+        trace = future_trace
+        print("concatenated traces")
+    else:
+        trace = traces
+    
     # Begin checks
-    error = check_parameters_basic(M, N, K, tilesize, fill, which_animate)
+    error = check_parameters_basic(fill, which_animate)
+    if error == True:
+        return
+    
+    
+    (M, N, K, tilesize, error) = get_mnk(trace, M, N, K, tilesize)
     if error == True:
         return
         
@@ -868,7 +1012,10 @@ def animate_trace(trace,
     
     scheduler = trace["information"]["sched"]
     
-    hostname = trace["information"]["hostname"]
+    if("hostname" in trace["information"]):            
+        hostname = trace["information"]["hostname"]
+    else:
+        hostname = trace["nodes"]["hostname"][0] # TODO, come back to this later
     
     error = check_for_order_function(trace_type, order_func)
     if error == True:
@@ -890,9 +1037,15 @@ def animate_trace(trace,
         return
     
     # Begin estimation and preprocessing
-    name_to_task_num = get_work_tasks_indices(trace, task_type, running_system)
-    if name_to_task_num is None:
-        return
+    if task_to_trace is not None:
+        # Then take the user's parameters on blind faith
+        # TODO: in the future, implement a double-check for this
+        name_to_task_num = task_to_trace
+    else:
+        name_to_task_num = get_work_tasks_indices(trace, task_type, running_system)
+        print(name_to_task_num)
+        if name_to_task_num is None:
+            return
     work_tasks_indices = work_tasks_indices_from_names_dict(name_to_task_num)
     if work_tasks_indices == []:
         return
@@ -925,7 +1078,13 @@ def animate_trace(trace,
         if(len(orderdf) % expected_tasks == 0):
             print(f"Because {len(orderdf)} % {expected_tasks} is 0, I will assume you "
                   + f"included a warmup and I will consider the last {expected_tasks} tasks")
-            orderdf = orderdf[-expected_tasks:]
+            if(trace_type == "ptg"):
+                taskpool_target_id = orderdf['taskpool_id'].max()
+                orderdf = orderdf[orderdf['taskpool_id'] == taskpool_target_id]
+                print(f"since this is PTG, I am taking taskpool id {taskpool_target_id}")
+                print(f"now len is {len(orderdf)}")
+            else:
+                orderdf = orderdf[-expected_tasks:]
         warmup_runs = (len(orderdf) // expected_tasks) - 1
     
     
@@ -973,7 +1132,8 @@ def animate_trace(trace,
     fig, ((axE, axB), (axA, axC)) = init_plt_figure(which_animate, figsize_dims)
     
     
-    sim_memory = setup_caches(trace["information"]["HWLOC-XML"], tilesize)
+    if do_cache_sim:
+        sim_memory = setup_caches(trace["information"]["HWLOC-XML"], tilesize)
     
     # Enter the animation functions
     # plots: 'c' for just plotting matrix c, 'abc' for all three
@@ -1098,11 +1258,32 @@ def animate_trace(trace,
                 m = task["m"]
                 n = task["n"]
                 k = task["k"]
-                
+            # print(task)
             # print("core:", core)
             # print("m", m)
             # print("n", n)
             # print("k", k)
+            # if core == 0 or core == 1:
+                # print(f"core is {core}")
+            # k = 0
+            # core = 0
+            
+            
+            if k is None:
+                # Don't flag it for now
+                continue
+                k = 0
+            if m is None:
+                # Don't flag it for now
+                continue
+                m = 0
+            if n is None:
+                # Don't flag it for now
+                continue
+                n = 0
+            if core >= len(core_work_tiles):
+                # Don't flag it for now
+                core = 0
             
             # Update the sim cache
             if(core_work_tiles[core][0] != m or
@@ -1137,8 +1318,8 @@ def animate_trace(trace,
                 
             core_work_tiles[core] = [m, n, k] 
             
-            # always run cache simulation, regardless of whether the migrations check is done
-            cache_sim_dict[task["id"]] = sim_memory.access(core, m, n, k)
+            if do_cache_sim:
+                cache_sim_dict[task["id"]] = sim_memory.access(core, m, n, k)
                 
         if(plots == "c"):
             fig.suptitle("Problem at time t=%4.6fms (%s)" % (time_point_curr/10**6, title))
@@ -2246,7 +2427,7 @@ def generate_simulated_cache_hit_graph(orderdf_file, title=None, cache=None, win
     print("3 hits:", len(sim_SC_3hit_df))
     print("2 hits:", len(sim_SC_2hit_df))
     print("1 hits:", len(sim_SC_1hit_df))
-    print("1 hits:", len(sim_SC_0hit_df))
+    print("0 hits:", len(sim_SC_0hit_df))
     
     sim_SC_3hit_tasks_times = sim_SC_3hit_df["duration"].to_numpy()
     sim_SC_2hit_tasks_times = sim_SC_2hit_df["duration"].to_numpy()
