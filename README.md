@@ -8,4 +8,8 @@ Necessary packages:
 * pandas
 
 Find an environment to run the jupyter notebook, install necessary packages,
-it should run right out of the box!
+it should run right out of the box (hopefully...) !
+
+
+
+Main file: `parsec_animation_utils.py`
